@@ -7,13 +7,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
-  /* ===== Swiss Utility · Token-Set =====
-     paper   #F4F4F1   Hintergrund
-     card    #FFFFFF   Panel
-     hair    #DDDDD6   Hairlines
-     ink     #141513   Text
-     gray    #70746F   Sekundär
-     signal  #E03131   Akzent (Playhead, Live, Aktion)            */
+  /* ===== Swiss Utility · Token-Set ===== */
   :root{
     --paper:#F4F4F1; --card:#FFFFFF; --hair:#DDDDD6; --hair2:#E9E9E4;
     --ink:#141513; --gray:#70746F; --signal:#E03131;
@@ -47,7 +41,7 @@
   .locbtn:active{transform:scale(.94)}
   .locbtn:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
 
-  /* Panel: randlos, bündig unten */
+  /* Panel */
   .panel{position:fixed;left:0;right:0;bottom:0;z-index:1000;background:var(--card);
     border-top:1px solid var(--hair);
     padding:15px 16px calc(env(safe-area-inset-bottom,0px) + 16px)}
@@ -58,6 +52,9 @@
   .timeinfo{flex:1;min-width:0}
   .t{font-size:30px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.01em;line-height:1}
   .rel{font-size:11px;font-weight:500;color:var(--gray);margin-top:3px;text-transform:uppercase;letter-spacing:.04em}
+  .nowbtn{flex:0 0 auto;font-size:10px;font-weight:700;letter-spacing:.12em;cursor:pointer;
+    padding:6px 10px;border-radius:2px;border:1px solid var(--hair);background:var(--card);color:var(--gray)}
+  .nowbtn:active{transform:scale(.95)}
   .badge{flex:0 0 auto;font-size:10px;font-weight:700;letter-spacing:.12em;
     padding:5px 9px;border-radius:2px;border:1px solid var(--ink);color:var(--ink)}
   .badge.fc{border-color:var(--signal);color:var(--signal)}
@@ -69,22 +66,31 @@
   .nc.rain .ncdot{background:var(--signal)}
   .nc b{color:var(--ink);font-weight:600}
 
-  /* Timeline: Lineal mit rotem Playhead */
+  /* Timeline: Tape — Nadel fix in der Mitte, Band läuft dahinter */
   .tl{margin-top:14px}
-  .track{position:relative;height:30px;touch-action:none;cursor:pointer}
-  .rail{position:absolute;left:0;right:0;top:50%;height:14px;transform:translateY(-50%);
-    background:var(--hair2);overflow:hidden}
-  .rail .fut{position:absolute;top:0;bottom:0;right:0;
+  .track{position:relative;height:54px;touch-action:none;cursor:grab;overflow:hidden;
+    -webkit-mask-image:linear-gradient(90deg,transparent,#000 10%,#000 90%,transparent);
+    mask-image:linear-gradient(90deg,transparent,#000 10%,#000 90%,transparent)}
+  .track:active{cursor:grabbing}
+  .track.loading::after{content:"";position:absolute;left:0;right:0;top:14px;height:14px;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.85),transparent);
+    transform:translateX(-100%);animation:shimmer 1.4s ease infinite}
+  @keyframes shimmer{to{transform:translateX(100%)}}
+  .strip{position:absolute;top:0;bottom:0;left:0;will-change:transform}
+  .striprail{position:absolute;left:0;right:0;top:14px;height:14px;background:var(--hair2)}
+  .striprail .fut{position:absolute;top:0;bottom:0;
     background:repeating-linear-gradient(90deg,var(--hair2) 0 4px,var(--hair) 4px 5px)}
-  .seg{position:absolute;top:0;bottom:0;width:1px;background:#CFCFC8}
-  .playhead{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--signal);transform:translateX(-50%)}
-  .playhead::after{content:"";position:absolute;top:-4px;left:50%;transform:translateX(-50%);
-    border:4px solid transparent;border-top:5px solid var(--signal)}
-  .nowmk{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--ink);display:none}
-  .nowmk::after{content:"JETZT";position:absolute;top:-13px;left:50%;transform:translateX(-50%);
+  .seg{position:absolute;top:3px;bottom:3px;width:1px;background:#D6D6CF}
+  .seg.hour{top:0;bottom:0;background:#B9B9B0}
+  .hlabel{position:absolute;top:35px;transform:translateX(-50%);
+    font-size:10px;font-weight:500;color:var(--gray);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .nowmk{position:absolute;top:11px;height:20px;width:2px;background:var(--ink)}
+  .nowmk::after{content:"JETZT";position:absolute;top:-11px;left:50%;transform:translateX(-50%);
     font-size:8px;font-weight:700;letter-spacing:.13em;color:var(--gray)}
-  .labels{display:flex;justify-content:space-between;margin-top:8px;
-    font-size:11px;font-weight:500;color:var(--gray);font-variant-numeric:tabular-nums}
+  .playhead{position:absolute;left:50%;top:10px;height:22px;width:2px;background:var(--signal);
+    transform:translateX(-50%);pointer-events:none;z-index:2}
+  .playhead::after{content:"";position:absolute;top:-5px;left:50%;transform:translateX(-50%);
+    border:4px solid transparent;border-top:5px solid var(--signal)}
 
   /* Legende */
   .legend{position:fixed;right:12px;top:50%;transform:translateY(-50%);z-index:999;
@@ -100,7 +106,7 @@
     padding:9px 14px;font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none;text-align:center}
   .toast.show{opacity:1}
 
-  @media (prefers-reduced-motion:reduce){.live .dot::after{animation:none}}
+  @media (prefers-reduced-motion:reduce){.live .dot::after{animation:none}.rail.loading::after{animation:none}}
 </style>
 </head>
 <body>
@@ -125,16 +131,17 @@
       <div class="t" id="time">––:––</div>
       <div class="rel" id="rel">Daten laden</div>
     </div>
+    <button class="nowbtn" id="jumpNow" aria-label="Zu Jetzt springen">JETZT</button>
     <div class="badge" id="badge">INCA</div>
   </div>
   <div class="nc" id="ncTxt"><div class="ncdot"></div><span id="ncMsg"></span></div>
   <div class="tl">
-    <div class="track" id="track" role="slider" aria-label="Zeitleiste" tabindex="0">
-      <div class="rail" id="rail"><div class="fut" id="futShade"></div></div>
-      <div class="nowmk" id="nowmark"></div>
-      <div class="playhead" id="playhead" style="left:0%"></div>
+    <div class="track loading" id="track" role="slider" aria-label="Zeitleiste" tabindex="0">
+      <div class="strip" id="strip">
+        <div class="striprail" id="rail"><div class="fut" id="futShade"></div></div>
+      </div>
+      <div class="playhead" aria-hidden="true"></div>
     </div>
-    <div class="labels"><span id="lblStart">–</span><span id="lblEnd">–</span></div>
   </div>
 </div>
 
@@ -142,16 +149,20 @@
 
 <script>
 /* ============================================================
-   Regenradar AT — Swiss Utility Edition
+   Regenradar AT — Swiss Utility · v2
    Daten: GeoSphere Austria INCA (CC-BY 4.0) · Fallback RainViewer
-   Engine: kontinuierlicher Crossfade (rAF)
+   Neu: bis zu +6 h Nowcast, letzte 90 min Rückblick (wenn
+   verfügbar), Stunden-Lineal, JETZT-Sprung, adaptives Tempo
    ============================================================ */
 const GS_API='https://dataset.api.hub.geosphere.at/v1';
 const AT_BOUNDS={s:46.0,w:9.2,n:49.4,e:17.6};
 const MAX_SPAN={lat:1.6,lon:2.6};
-const MAX_FRAMES=10;
-const MS_PER_FRAME=850, END_HOLD=1300, LAYER_ALPHA=0.78;
+const MAX_FUTURE=25;          /* 25 × 15 min ≈ +6 h */
+const PAST_MIN=90;            /* Rückblick-Fenster in Minuten */
+const END_HOLD=1300, LAYER_ALPHA=0.78;
 const REDUCED=matchMedia('(prefers-reduced-motion: reduce)').matches;
+const PPF=56;                 /* Pixel pro 15-min-Frame am Band */
+addEventListener('resize',()=>frames.length&&applyPos());
 
 const map=L.map('map',{zoomControl:false,fadeAnimation:false}).setView([48.175,16.38],10);
 L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{
@@ -161,13 +172,21 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{
 
 const $=id=>document.getElementById(id);
 const fmt=ms=>new Date(ms).toLocaleTimeString('de-AT',{hour:'2-digit',minute:'2-digit'});
+function relFmt(min){
+  const a=Math.abs(min);
+  if(a<60)return a+' min';
+  const h=Math.floor(a/60),m=a%60;
+  return h+' h'+(m?' '+m+' min':'');
+}
 function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');
   clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('show'),3200)}
 
 let frames=[],pos=0,playing=true,holdUntil=0,lastT=0;
 let source=null,fetchedBbox=null;
+const frameMs=()=>frames.length>14?620:850;   /* mehr Frames → flotteres Tempo */
+const nowIdx=()=>{let k=0;frames.forEach((f,j)=>{if(!f.future)k=j});return k};
 
-/* Farbskala für helle Karte: Blau → Tiefblau → Violett → Signalrot (mm/15min) */
+/* Farbskala: Blau → Tiefblau → Violett → Signalrot (mm/15min) */
 function colorFor(v){
   if(v<0.05)return null;
   if(v<0.2) return[62,143,243,165];
@@ -196,13 +215,13 @@ function applyPos(){
   const fut=frames[Math.round(pos)].future;
   const rel=$('rel'),badge=$('badge');
   if(fut){
-    rel.textContent=diff<=0?'Nowcast':'Nowcast · in '+diff+' min';
+    rel.textContent=diff<=0?'Nowcast':'Nowcast · in '+relFmt(diff);
     badge.textContent='NOWCAST';badge.classList.add('fc');
   }else{
-    rel.textContent=diff>=-2?'Jetzt':'Vor '+Math.abs(diff)+' min';
+    rel.textContent=diff>=-2?'Jetzt':'Vor '+relFmt(diff);
     badge.textContent=source==='inca'?'INCA':'RADAR';badge.classList.remove('fc');
   }
-  $('playhead').style.left=((pos+0.5)/n*100)+'%';
+  $('strip').style.transform='translateX('+($('track').clientWidth/2-(pos+0.5)*PPF)+'px)';
 }
 
 function loop(t){
@@ -212,10 +231,10 @@ function loop(t){
   const dt=Math.min(t-lastT,100);lastT=t;
   if(REDUCED){
     loop._acc=(loop._acc||0)+dt;
-    if(loop._acc>=MS_PER_FRAME){loop._acc=0;pos=Math.floor(pos)+1;
+    if(loop._acc>=frameMs()){loop._acc=0;pos=Math.floor(pos)+1;
       if(pos>frames.length-1){pos=0;holdUntil=t+END_HOLD}}
   }else{
-    pos+=dt/MS_PER_FRAME;
+    pos+=dt/frameMs();
     if(pos>=frames.length-1){pos=frames.length-1;applyPos();holdUntil=t+END_HOLD;
       setTimeout(()=>{if(playing)pos=0},END_HOLD);return}
   }
@@ -227,8 +246,9 @@ function setPlaying(p){playing=p;
   $('play').textContent=p?'⏸':'▶';
   $('play').setAttribute('aria-label',p?'Pause':'Abspielen')}
 $('play').addEventListener('click',()=>setPlaying(!playing));
+$('jumpNow').addEventListener('click',()=>{pos=nowIdx();applyPos()});
 
-/* ---------- INCA ---------- */
+/* ---------- Geometrie / Rendering ---------- */
 function currentBbox(){
   const b=map.getBounds(),c=map.getCenter();
   let s=Math.max(b.getSouth(),AT_BOUNDS.s),n=Math.min(b.getNorth(),AT_BOUNDS.n),
@@ -241,52 +261,77 @@ function currentBbox(){
 }
 function clearFrames(){frames.forEach(f=>f.overlay&&map.removeLayer(f.overlay));frames=[]}
 
-async function loadINCA(){
-  const bb=currentBbox();
-  const url=`${GS_API}/grid/forecast/nowcast-v1-15min-1km?parameters=rr`+
-    `&bbox=${bb.s.toFixed(3)},${bb.w.toFixed(3)},${bb.n.toFixed(3)},${bb.e.toFixed(3)}&output_format=geojson`;
+function renderFrame(feats,tIndex,bb){
+  const W=500,H=Math.round(W*(bb.n-bb.s)/((bb.e-bb.w)*Math.cos((bb.s+bb.n)/2*Math.PI/180)));
+  const px=lon=>Math.round((lon-bb.w)/(bb.e-bb.w)*(W-1));
+  const py=lat=>Math.round((bb.n-lat)/(bb.n-bb.s)*(H-1));
+  const raw=document.createElement('canvas');raw.width=W;raw.height=H;
+  const rctx=raw.getContext('2d');
+  const img=rctx.createImageData(W,H),d=img.data;
+  for(const ft of feats){
+    const v=ft.properties?.parameters?.rr?.data?.[tIndex];
+    if(v==null)continue;
+    const c=colorFor(v);if(!c)continue;
+    const x=px(ft.geometry.coordinates[0]),y=py(ft.geometry.coordinates[1]);
+    for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){
+      const xx=x+dx,yy=y+dy;
+      if(xx<0||yy<0||xx>=W||yy>=H)continue;
+      const i=(yy*W+xx)*4;
+      if(d[i+3]>=c[3])continue;
+      d[i]=c[0];d[i+1]=c[1];d[i+2]=c[2];d[i+3]=c[3];
+    }
+  }
+  rctx.putImageData(img,0,0);
+  const soft=document.createElement('canvas');soft.width=W;soft.height=H;
+  const sctx=soft.getContext('2d');
+  sctx.filter='blur(2.5px) saturate(1.1)';
+  sctx.drawImage(raw,0,0);
+  return L.imageOverlay(soft.toDataURL(),[[bb.s,bb.w],[bb.n,bb.e]],
+    {opacity:0,zIndex:200,interactive:false}).addTo(map);
+}
+
+async function fetchGrid(url){
   const res=await fetch(url);
   if(!res.ok)throw new Error('HTTP '+res.status);
   const gj=await res.json();
-  const ts=(gj.timestamps||[]).slice(0,MAX_FRAMES);
-  const feats=gj.features||[];
-  if(!ts.length||!feats.length)throw new Error('leere Antwort');
+  if(!(gj.timestamps||[]).length||!(gj.features||[]).length)throw new Error('leer');
+  return gj;
+}
 
-  const W=520,H=Math.round(W*(bb.n-bb.s)/((bb.e-bb.w)*Math.cos((bb.s+bb.n)/2*Math.PI/180)));
-  const px=lon=>Math.round((lon-bb.w)/(bb.e-bb.w)*(W-1));
-  const py=lat=>Math.round((bb.n-lat)/(bb.n-bb.s)*(H-1));
-  const bounds=[[bb.s,bb.w],[bb.n,bb.e]];
+/* ---------- INCA: Rückblick (optional) + Nowcast ---------- */
+async function loadINCA(){
+  const bb=currentBbox();
+  const bboxStr=`${bb.s.toFixed(3)},${bb.w.toFixed(3)},${bb.n.toFixed(3)},${bb.e.toFixed(3)}`;
+  $('track').classList.add('loading');
+
+  /* Nowcast (Pflicht) */
+  const nc=await fetchGrid(`${GS_API}/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox=${bboxStr}&output_format=geojson`);
+
+  /* Rückblick (optional, scheitert leise wenn Datensatz nicht verfügbar) */
+  let hist=null;
+  try{
+    const end=new Date(),start=new Date(Date.now()-PAST_MIN*60000);
+    hist=await fetchGrid(`${GS_API}/grid/historical/inca-v1-15min-1km?parameters=rr&bbox=${bboxStr}`+
+      `&start=${start.toISOString().slice(0,16)}&end=${end.toISOString().slice(0,16)}&output_format=geojson`);
+  }catch(e){hist=null}
 
   const nf=[];
-  for(let t=0;t<ts.length;t++){
-    const raw=document.createElement('canvas');raw.width=W;raw.height=H;
-    const rctx=raw.getContext('2d');
-    const img=rctx.createImageData(W,H),d=img.data;
-    for(const ft of feats){
-      const v=ft.properties?.parameters?.rr?.data?.[t];
-      if(v==null)continue;
-      const c=colorFor(v);if(!c)continue;
-      const x=px(ft.geometry.coordinates[0]),y=py(ft.geometry.coordinates[1]);
-      for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){
-        const xx=x+dx,yy=y+dy;
-        if(xx<0||yy<0||xx>=W||yy>=H)continue;
-        const i=(yy*W+xx)*4;
-        if(d[i+3]>=c[3])continue;
-        d[i]=c[0];d[i+1]=c[1];d[i+2]=c[2];d[i+3]=c[3];
-      }
+  const ncTimes=(nc.timestamps||[]).slice(0,MAX_FUTURE).map(Date.parse);
+  if(hist){
+    const ht=(hist.timestamps||[]).map(Date.parse);
+    for(let t=0;t<ht.length;t++){
+      if(ncTimes.length&&ht[t]>=ncTimes[0])continue;   /* Überlapp dedupen */
+      nf.push({time:ht[t],future:false,overlay:renderFrame(hist.features,t,bb)});
     }
-    rctx.putImageData(img,0,0);
-    const soft=document.createElement('canvas');soft.width=W;soft.height=H;
-    const sctx=soft.getContext('2d');
-    sctx.filter='blur(2.5px) saturate(1.1)';
-    sctx.drawImage(raw,0,0);
-    const ov=L.imageOverlay(soft.toDataURL(),bounds,{opacity:0,zIndex:200,interactive:false}).addTo(map);
-    nf.push({time:Date.parse(ts[t]),future:t>0,overlay:ov});
+  }
+  const NOW=Date.now()+60000;
+  for(let t=0;t<ncTimes.length;t++){
+    nf.push({time:ncTimes[t],future:ncTimes[t]>NOW,overlay:renderFrame(nc.features,t,bb)});
   }
   clearFrames();frames=nf;
   fetchedBbox=bb;source='inca';
   $('srcTxt').textContent='LIVE · INCA';$('liveBadge').classList.remove('off');
-  buildTimeline();pos=0;applyPos();
+  buildTimeline();pos=nowIdx();applyPos();
 }
 
 /* ---------- Fallback: RainViewer ---------- */
@@ -301,39 +346,55 @@ async function loadRainViewer(){
   if(!frames.length)throw new Error('keine Frames');
   source='rainviewer';
   $('srcTxt').textContent='RAINVIEWER';$('liveBadge').classList.add('off');
-  buildTimeline();
-  pos=frames.filter(f=>!f.future).length-1;applyPos();
+  buildTimeline();pos=nowIdx();applyPos();
 }
 
-/* ---------- Timeline ---------- */
+/* ---------- Timeline-Band aufbauen ---------- */
 function buildTimeline(){
-  const rail=$('rail');
+  const track=$('track'),strip=$('strip'),rail=$('rail');
+  track.classList.remove('loading');
   rail.querySelectorAll('.seg').forEach(s=>s.remove());
+  strip.querySelectorAll('.hlabel,.nowmk').forEach(s=>s.remove());
   const n=frames.length;
-  for(let j=1;j<n;j++){
-    const s=document.createElement('div');s.className='seg';
-    s.style.left=(j/n*100)+'%';rail.appendChild(s);
+  strip.style.width=(n*PPF)+'px';
+  for(let j=0;j<n;j++){
+    const onHour=new Date(frames[j].time).getMinutes()===0;
+    if(j>0){
+      const s=document.createElement('div');
+      s.className='seg'+(onHour?' hour':'');
+      s.style.left=(j*PPF)+'px';rail.appendChild(s);
+    }
+    if(onHour){
+      const sp=document.createElement('span');
+      sp.className='hlabel';
+      sp.textContent=fmt(frames[j].time).replace(':00','');
+      sp.style.left=((j+0.5)*PPF)+'px';strip.appendChild(sp);
+    }
   }
-  $('lblStart').textContent=fmt(frames[0].time);
-  $('lblEnd').textContent=fmt(frames[n-1].time);
   const fi=frames.findIndex(f=>f.future);
-  const nm=$('nowmark'),fs=$('futShade');
-  if(fi>0){nm.style.display='block';nm.style.left=(fi/n*100)+'%';
-    fs.style.width=((n-fi)/n*100)+'%'}
-  else{nm.style.display='none';fs.style.width=fi===0?'100%':'0'}
+  const fs=$('futShade');
+  if(fi>0){
+    fs.style.left=(fi*PPF)+'px';fs.style.width=((n-fi)*PPF)+'px';
+    const nm=document.createElement('div');nm.className='nowmk';
+    nm.style.left=(fi*PPF)+'px';strip.appendChild(nm);
+  }else{
+    fs.style.left='0';fs.style.width=(fi===0?n*PPF:0)+'px';
+  }
 }
 
-/* ---------- Scrubbing ---------- */
+/* ---------- Band ziehen (Tape-Scrubbing) ---------- */
 const track=$('track');
-function scrub(e){
-  const r=track.getBoundingClientRect();
-  const x=(e.touches?e.touches[0].clientX:e.clientX)-r.left;
-  pos=Math.max(0,Math.min(frames.length-1,x/r.width*frames.length-0.5));
-  applyPos();
-}
-track.addEventListener('pointerdown',e=>{setPlaying(false);scrub(e);
-  track.setPointerCapture(e.pointerId);track.onpointermove=scrub});
+track.addEventListener('pointerdown',e=>{
+  setPlaying(false);
+  const startX=e.clientX,startPos=pos;
+  track.setPointerCapture(e.pointerId);
+  track.onpointermove=ev=>{
+    pos=Math.max(0,Math.min(frames.length-1,startPos+(startX-ev.clientX)/PPF));
+    applyPos();
+  };
+});
 track.addEventListener('pointerup',()=>track.onpointermove=null);
+track.addEventListener('pointercancel',()=>track.onpointermove=null);
 track.addEventListener('keydown',e=>{
   if(e.key==='ArrowRight'){setPlaying(false);pos=Math.min(frames.length-1,Math.floor(pos)+1);applyPos()}
   if(e.key==='ArrowLeft'){setPlaying(false);pos=Math.max(0,Math.ceil(pos)-1);applyPos()}
@@ -352,12 +413,12 @@ async function pointNowcast(lat,lon){
     const first=data.findIndex(v=>v!=null&&v>=0.1);
     if(first===-1){
       box.classList.remove('rain');
-      msg.innerHTML='<b>Kein Regen</b> in den nächsten 2 Stunden an deinem Standort';
+      msg.innerHTML='<b>Kein Regen</b> in den nächsten Stunden an deinem Standort';
     }else{
       const mins=Math.max(0,Math.round((Date.parse(ts[first])-Date.now())/60000));
       box.classList.add('rain');
       msg.innerHTML=mins<=5?'<b>Es regnet</b> gerade an deinem Standort'
-        :`<b>Regen ab ca. ${fmt(Date.parse(ts[first]))}</b> · in ~${mins} min`;
+        :`<b>Regen ab ca. ${fmt(Date.parse(ts[first]))}</b> · in ~${relFmt(mins)}`;
     }
     box.classList.add('show');
   }catch(e){}
@@ -402,6 +463,7 @@ map.on('moveend',()=>{
     console.warn('INCA fehlgeschlagen:',e);
     toast('GeoSphere nicht erreichbar – RainViewer-Fallback aktiv');
     try{await loadRainViewer()}catch(e2){
+      $('track').classList.remove('loading');
       $('rel').textContent='Keine Radardaten verfügbar';setPlaying(false)}
   }
   setInterval(()=>{(source==='inca'?loadINCA():loadRainViewer()).catch(()=>{})},600000);
