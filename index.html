@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Regenradar</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  /* ===== Swiss Utility · Token-Set =====
+     paper   #F4F4F1   Hintergrund
+     card    #FFFFFF   Panel
+     hair    #DDDDD6   Hairlines
+     ink     #141513   Text
+     gray    #70746F   Sekundär
+     signal  #E03131   Akzent (Playhead, Live, Aktion)            */
+  :root{
+    --paper:#F4F4F1; --card:#FFFFFF; --hair:#DDDDD6; --hair2:#E9E9E4;
+    --ink:#141513; --gray:#70746F; --signal:#E03131;
+    --body:"Helvetica Neue",Helvetica,Arial,sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:var(--paper);font-family:var(--body);color:var(--ink);overflow:hidden}
+  #map{position:fixed;inset:0;background:var(--paper)}
+  .leaflet-container{background:var(--paper)}
+  .leaflet-image-layer{will-change:opacity}
+  .leaflet-control-zoom{display:none}
+  .leaflet-control-attribution{background:rgba(244,244,241,.75)!important;color:var(--gray)!important;font-size:9px!important}
+  .leaflet-control-attribution a{color:var(--gray)!important}
+
+  /* Header */
+  .hdr{position:fixed;top:0;left:0;right:0;z-index:1000;display:flex;align-items:center;justify-content:space-between;
+    padding:calc(env(safe-area-inset-top,0px) + 14px) 16px 16px;
+    background:linear-gradient(var(--paper) 55%,rgba(244,244,241,0));pointer-events:none}
+  .brand h1{font-size:17px;font-weight:700;letter-spacing:-.01em}
+  .hdr .right{display:flex;align-items:center;gap:10px;pointer-events:auto}
+  .live{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:500;color:var(--signal)}
+  .live .dot{width:8px;height:8px;border-radius:50%;background:var(--signal);position:relative}
+  .live .dot::after{content:"";position:absolute;inset:-4px;border-radius:50%;border:1.5px solid var(--signal);
+    animation:ping 2.2s cubic-bezier(0,0,.2,1) infinite}
+  @keyframes ping{0%{transform:scale(.5);opacity:.9}80%,100%{transform:scale(1.6);opacity:0}}
+  .live.off{color:var(--gray)}
+  .live.off .dot{background:var(--gray)}
+  .live.off .dot::after{display:none}
+  .locbtn{background:var(--card);border:1px solid var(--hair);color:var(--ink);
+    width:40px;height:40px;border-radius:4px;display:grid;place-items:center;cursor:pointer;font-size:17px}
+  .locbtn:active{transform:scale(.94)}
+  .locbtn:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
+
+  /* Panel: randlos, bündig unten */
+  .panel{position:fixed;left:0;right:0;bottom:0;z-index:1000;background:var(--card);
+    border-top:1px solid var(--hair);
+    padding:15px 16px calc(env(safe-area-inset-bottom,0px) + 16px)}
+  .row{display:flex;align-items:center;gap:13px}
+  .playbtn{flex:0 0 auto;width:46px;height:46px;border-radius:4px;border:none;cursor:pointer;
+    background:var(--signal);color:#fff;font-size:17px;display:grid;place-items:center}
+  .playbtn:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+  .timeinfo{flex:1;min-width:0}
+  .t{font-size:30px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.01em;line-height:1}
+  .rel{font-size:11px;font-weight:500;color:var(--gray);margin-top:3px;text-transform:uppercase;letter-spacing:.04em}
+  .badge{flex:0 0 auto;font-size:10px;font-weight:700;letter-spacing:.12em;
+    padding:5px 9px;border-radius:2px;border:1px solid var(--ink);color:var(--ink)}
+  .badge.fc{border-color:var(--signal);color:var(--signal)}
+
+  .nc{margin-top:12px;padding-top:12px;border-top:1px solid var(--hair2);
+    font-size:13px;color:var(--gray);display:none;gap:8px;align-items:center}
+  .nc.show{display:flex}
+  .nc .ncdot{width:8px;height:8px;background:var(--ink);flex:0 0 auto}
+  .nc.rain .ncdot{background:var(--signal)}
+  .nc b{color:var(--ink);font-weight:600}
+
+  /* Timeline: Lineal mit rotem Playhead */
+  .tl{margin-top:14px}
+  .track{position:relative;height:30px;touch-action:none;cursor:pointer}
+  .rail{position:absolute;left:0;right:0;top:50%;height:14px;transform:translateY(-50%);
+    background:var(--hair2);overflow:hidden}
+  .rail .fut{position:absolute;top:0;bottom:0;right:0;
+    background:repeating-linear-gradient(90deg,var(--hair2) 0 4px,var(--hair) 4px 5px)}
+  .seg{position:absolute;top:0;bottom:0;width:1px;background:#CFCFC8}
+  .playhead{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--signal);transform:translateX(-50%)}
+  .playhead::after{content:"";position:absolute;top:-4px;left:50%;transform:translateX(-50%);
+    border:4px solid transparent;border-top:5px solid var(--signal)}
+  .nowmk{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--ink);display:none}
+  .nowmk::after{content:"JETZT";position:absolute;top:-13px;left:50%;transform:translateX(-50%);
+    font-size:8px;font-weight:700;letter-spacing:.13em;color:var(--gray)}
+  .labels{display:flex;justify-content:space-between;margin-top:8px;
+    font-size:11px;font-weight:500;color:var(--gray);font-variant-numeric:tabular-nums}
+
+  /* Legende */
+  .legend{position:fixed;right:12px;top:50%;transform:translateY(-50%);z-index:999;
+    background:var(--card);border:1px solid var(--hair);border-radius:4px;padding:10px 9px;
+    display:flex;flex-direction:column;align-items:center;gap:6px}
+  .lbar{width:8px;height:110px;
+    background:linear-gradient(to top,#3E8FF3,#2362D2,#7C3AED,#E03131)}
+  .legend span{font-size:8.5px;font-weight:500;color:var(--gray);letter-spacing:.08em;
+    writing-mode:vertical-rl;transform:rotate(180deg)}
+
+  .toast{position:fixed;top:calc(env(safe-area-inset-top,0px) + 66px);left:50%;transform:translateX(-50%);
+    z-index:1100;background:var(--ink);color:var(--paper);border-radius:4px;max-width:88%;
+    padding:9px 14px;font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none;text-align:center}
+  .toast.show{opacity:1}
+
+  @media (prefers-reduced-motion:reduce){.live .dot::after{animation:none}}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div class="hdr">
+  <div class="brand"><h1>Regenradar</h1></div>
+  <div class="right">
+    <div class="live off" id="liveBadge"><div class="dot"></div><span id="srcTxt">VERBINDE</span></div>
+    <button class="locbtn" id="locate" title="Mein Standort" aria-label="Mein Standort">◎</button>
+  </div>
+</div>
+
+<div class="legend" aria-hidden="true">
+  <span>stark</span><div class="lbar"></div><span>leicht</span>
+</div>
+
+<div class="panel">
+  <div class="row">
+    <button class="playbtn" id="play" aria-label="Pause">⏸</button>
+    <div class="timeinfo">
+      <div class="t" id="time">––:––</div>
+      <div class="rel" id="rel">Daten laden</div>
+    </div>
+    <div class="badge" id="badge">INCA</div>
+  </div>
+  <div class="nc" id="ncTxt"><div class="ncdot"></div><span id="ncMsg"></span></div>
+  <div class="tl">
+    <div class="track" id="track" role="slider" aria-label="Zeitleiste" tabindex="0">
+      <div class="rail" id="rail"><div class="fut" id="futShade"></div></div>
+      <div class="nowmk" id="nowmark"></div>
+      <div class="playhead" id="playhead" style="left:0%"></div>
+    </div>
+    <div class="labels"><span id="lblStart">–</span><span id="lblEnd">–</span></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ============================================================
+   Regenradar AT — Swiss Utility Edition
+   Daten: GeoSphere Austria INCA (CC-BY 4.0) · Fallback RainViewer
+   Engine: kontinuierlicher Crossfade (rAF)
+   ============================================================ */
+const GS_API='https://dataset.api.hub.geosphere.at/v1';
+const AT_BOUNDS={s:46.0,w:9.2,n:49.4,e:17.6};
+const MAX_SPAN={lat:1.6,lon:2.6};
+const MAX_FRAMES=10;
+const MS_PER_FRAME=850, END_HOLD=1300, LAYER_ALPHA=0.78;
+const REDUCED=matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const map=L.map('map',{zoomControl:false,fadeAnimation:false}).setView([48.175,16.38],10);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{
+  attribution:'&copy; OSM &copy; CARTO &middot; Daten: <a href="https://data.hub.geosphere.at">GeoSphere Austria</a> (CC-BY 4.0) / RainViewer',
+  maxZoom:18,subdomains:'abcd'
+}).addTo(map);
+
+const $=id=>document.getElementById(id);
+const fmt=ms=>new Date(ms).toLocaleTimeString('de-AT',{hour:'2-digit',minute:'2-digit'});
+function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');
+  clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('show'),3200)}
+
+let frames=[],pos=0,playing=true,holdUntil=0,lastT=0;
+let source=null,fetchedBbox=null;
+
+/* Farbskala für helle Karte: Blau → Tiefblau → Violett → Signalrot (mm/15min) */
+function colorFor(v){
+  if(v<0.05)return null;
+  if(v<0.2) return[62,143,243,165];
+  if(v<0.5) return[35,98,210,185];
+  if(v<1.0) return[63,72,204,200];
+  if(v<2.5) return[124,58,237,210];
+  if(v<5.0) return[224,49,49,220];
+  return[122,18,18,230];
+}
+
+/* ---------- Crossfade-Engine ---------- */
+function applyPos(){
+  const n=frames.length;if(!n)return;
+  pos=Math.max(0,Math.min(n-1,pos));
+  const i=Math.floor(pos),f=pos-i;
+  for(let j=0;j<n;j++){
+    let o=0;
+    if(j===i)o=(1-f)*LAYER_ALPHA;
+    else if(j===i+1)o=f*LAYER_ALPHA;
+    frames[j].overlay.setOpacity(o);
+  }
+  const tA=frames[i].time,tB=frames[Math.min(i+1,n-1)].time;
+  const t=tA+(tB-tA)*f;
+  $('time').textContent=fmt(t);
+  const diff=Math.round((t-Date.now())/60000);
+  const fut=frames[Math.round(pos)].future;
+  const rel=$('rel'),badge=$('badge');
+  if(fut){
+    rel.textContent=diff<=0?'Nowcast':'Nowcast · in '+diff+' min';
+    badge.textContent='NOWCAST';badge.classList.add('fc');
+  }else{
+    rel.textContent=diff>=-2?'Jetzt':'Vor '+Math.abs(diff)+' min';
+    badge.textContent=source==='inca'?'INCA':'RADAR';badge.classList.remove('fc');
+  }
+  $('playhead').style.left=((pos+0.5)/n*100)+'%';
+}
+
+function loop(t){
+  requestAnimationFrame(loop);
+  if(!playing||!frames.length){lastT=t;return}
+  if(t<holdUntil){lastT=t;return}
+  const dt=Math.min(t-lastT,100);lastT=t;
+  if(REDUCED){
+    loop._acc=(loop._acc||0)+dt;
+    if(loop._acc>=MS_PER_FRAME){loop._acc=0;pos=Math.floor(pos)+1;
+      if(pos>frames.length-1){pos=0;holdUntil=t+END_HOLD}}
+  }else{
+    pos+=dt/MS_PER_FRAME;
+    if(pos>=frames.length-1){pos=frames.length-1;applyPos();holdUntil=t+END_HOLD;
+      setTimeout(()=>{if(playing)pos=0},END_HOLD);return}
+  }
+  applyPos();
+}
+requestAnimationFrame(loop);
+
+function setPlaying(p){playing=p;
+  $('play').textContent=p?'⏸':'▶';
+  $('play').setAttribute('aria-label',p?'Pause':'Abspielen')}
+$('play').addEventListener('click',()=>setPlaying(!playing));
+
+/* ---------- INCA ---------- */
+function currentBbox(){
+  const b=map.getBounds(),c=map.getCenter();
+  let s=Math.max(b.getSouth(),AT_BOUNDS.s),n=Math.min(b.getNorth(),AT_BOUNDS.n),
+      w=Math.max(b.getWest(),AT_BOUNDS.w),e=Math.min(b.getEast(),AT_BOUNDS.e);
+  if(n-s>MAX_SPAN.lat){s=c.lat-MAX_SPAN.lat/2;n=c.lat+MAX_SPAN.lat/2}
+  if(e-w>MAX_SPAN.lon){w=c.lng-MAX_SPAN.lon/2;e=c.lng+MAX_SPAN.lon/2}
+  const pl=(n-s)*0.25,po=(e-w)*0.25;
+  return{s:Math.max(s-pl,AT_BOUNDS.s),n:Math.min(n+pl,AT_BOUNDS.n),
+         w:Math.max(w-po,AT_BOUNDS.w),e:Math.min(e+po,AT_BOUNDS.e)};
+}
+function clearFrames(){frames.forEach(f=>f.overlay&&map.removeLayer(f.overlay));frames=[]}
+
+async function loadINCA(){
+  const bb=currentBbox();
+  const url=`${GS_API}/grid/forecast/nowcast-v1-15min-1km?parameters=rr`+
+    `&bbox=${bb.s.toFixed(3)},${bb.w.toFixed(3)},${bb.n.toFixed(3)},${bb.e.toFixed(3)}&output_format=geojson`;
+  const res=await fetch(url);
+  if(!res.ok)throw new Error('HTTP '+res.status);
+  const gj=await res.json();
+  const ts=(gj.timestamps||[]).slice(0,MAX_FRAMES);
+  const feats=gj.features||[];
+  if(!ts.length||!feats.length)throw new Error('leere Antwort');
+
+  const W=520,H=Math.round(W*(bb.n-bb.s)/((bb.e-bb.w)*Math.cos((bb.s+bb.n)/2*Math.PI/180)));
+  const px=lon=>Math.round((lon-bb.w)/(bb.e-bb.w)*(W-1));
+  const py=lat=>Math.round((bb.n-lat)/(bb.n-bb.s)*(H-1));
+  const bounds=[[bb.s,bb.w],[bb.n,bb.e]];
+
+  const nf=[];
+  for(let t=0;t<ts.length;t++){
+    const raw=document.createElement('canvas');raw.width=W;raw.height=H;
+    const rctx=raw.getContext('2d');
+    const img=rctx.createImageData(W,H),d=img.data;
+    for(const ft of feats){
+      const v=ft.properties?.parameters?.rr?.data?.[t];
+      if(v==null)continue;
+      const c=colorFor(v);if(!c)continue;
+      const x=px(ft.geometry.coordinates[0]),y=py(ft.geometry.coordinates[1]);
+      for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){
+        const xx=x+dx,yy=y+dy;
+        if(xx<0||yy<0||xx>=W||yy>=H)continue;
+        const i=(yy*W+xx)*4;
+        if(d[i+3]>=c[3])continue;
+        d[i]=c[0];d[i+1]=c[1];d[i+2]=c[2];d[i+3]=c[3];
+      }
+    }
+    rctx.putImageData(img,0,0);
+    const soft=document.createElement('canvas');soft.width=W;soft.height=H;
+    const sctx=soft.getContext('2d');
+    sctx.filter='blur(2.5px) saturate(1.1)';
+    sctx.drawImage(raw,0,0);
+    const ov=L.imageOverlay(soft.toDataURL(),bounds,{opacity:0,zIndex:200,interactive:false}).addTo(map);
+    nf.push({time:Date.parse(ts[t]),future:t>0,overlay:ov});
+  }
+  clearFrames();frames=nf;
+  fetchedBbox=bb;source='inca';
+  $('srcTxt').textContent='LIVE · INCA';$('liveBadge').classList.remove('off');
+  buildTimeline();pos=0;applyPos();
+}
+
+/* ---------- Fallback: RainViewer ---------- */
+async function loadRainViewer(){
+  const res=await fetch('https://api.rainviewer.com/public/weather-maps.json');
+  const data=await res.json();
+  const mk=(f,fut)=>({time:f.time*1000,future:fut,
+    overlay:L.tileLayer(data.host+f.path+'/256/{z}/{x}/{y}/4/1_1.png',{opacity:0,zIndex:200}).addTo(map)});
+  clearFrames();
+  frames=[...(data.radar.past||[]).map(f=>mk(f,false)),
+          ...(data.radar.nowcast||[]).map(f=>mk(f,true))];
+  if(!frames.length)throw new Error('keine Frames');
+  source='rainviewer';
+  $('srcTxt').textContent='RAINVIEWER';$('liveBadge').classList.add('off');
+  buildTimeline();
+  pos=frames.filter(f=>!f.future).length-1;applyPos();
+}
+
+/* ---------- Timeline ---------- */
+function buildTimeline(){
+  const rail=$('rail');
+  rail.querySelectorAll('.seg').forEach(s=>s.remove());
+  const n=frames.length;
+  for(let j=1;j<n;j++){
+    const s=document.createElement('div');s.className='seg';
+    s.style.left=(j/n*100)+'%';rail.appendChild(s);
+  }
+  $('lblStart').textContent=fmt(frames[0].time);
+  $('lblEnd').textContent=fmt(frames[n-1].time);
+  const fi=frames.findIndex(f=>f.future);
+  const nm=$('nowmark'),fs=$('futShade');
+  if(fi>0){nm.style.display='block';nm.style.left=(fi/n*100)+'%';
+    fs.style.width=((n-fi)/n*100)+'%'}
+  else{nm.style.display='none';fs.style.width=fi===0?'100%':'0'}
+}
+
+/* ---------- Scrubbing ---------- */
+const track=$('track');
+function scrub(e){
+  const r=track.getBoundingClientRect();
+  const x=(e.touches?e.touches[0].clientX:e.clientX)-r.left;
+  pos=Math.max(0,Math.min(frames.length-1,x/r.width*frames.length-0.5));
+  applyPos();
+}
+track.addEventListener('pointerdown',e=>{setPlaying(false);scrub(e);
+  track.setPointerCapture(e.pointerId);track.onpointermove=scrub});
+track.addEventListener('pointerup',()=>track.onpointermove=null);
+track.addEventListener('keydown',e=>{
+  if(e.key==='ArrowRight'){setPlaying(false);pos=Math.min(frames.length-1,Math.floor(pos)+1);applyPos()}
+  if(e.key==='ArrowLeft'){setPlaying(false);pos=Math.max(0,Math.ceil(pos)-1);applyPos()}
+  if(e.key===' '){e.preventDefault();setPlaying(!playing)}
+});
+
+/* ---------- Punkt-Nowcast ---------- */
+async function pointNowcast(lat,lon){
+  try{
+    const url=`${GS_API}/timeseries/forecast/nowcast-v1-15min-1km?parameters=rr&lat_lon=${lat.toFixed(4)},${lon.toFixed(4)}`;
+    const res=await fetch(url);if(!res.ok)return;
+    const j=await res.json();
+    const ts=j.timestamps||[];
+    const data=j.features?.[0]?.properties?.parameters?.rr?.data||[];
+    const box=$('ncTxt'),msg=$('ncMsg');
+    const first=data.findIndex(v=>v!=null&&v>=0.1);
+    if(first===-1){
+      box.classList.remove('rain');
+      msg.innerHTML='<b>Kein Regen</b> in den nächsten 2 Stunden an deinem Standort';
+    }else{
+      const mins=Math.max(0,Math.round((Date.parse(ts[first])-Date.now())/60000));
+      box.classList.add('rain');
+      msg.innerHTML=mins<=5?'<b>Es regnet</b> gerade an deinem Standort'
+        :`<b>Regen ab ca. ${fmt(Date.parse(ts[first]))}</b> · in ~${mins} min`;
+    }
+    box.classList.add('show');
+  }catch(e){}
+}
+
+async function getPosition(){
+  const Geo=window.Capacitor?.Plugins?.Geolocation;
+  if(Geo){
+    const p=await Geo.getCurrentPosition({enableHighAccuracy:false,timeout:10000});
+    return[p.coords.latitude,p.coords.longitude];
+  }
+  return new Promise((res,rej)=>{
+    if(!navigator.geolocation)return rej(new Error('unsupported'));
+    navigator.geolocation.getCurrentPosition(
+      p=>res([p.coords.latitude,p.coords.longitude]),rej);
+  });
+}
+$('locate').addEventListener('click',async()=>{
+  try{
+    const ll=await getPosition();
+    map.flyTo(ll,11,{duration:.8});
+    L.circleMarker(ll,{radius:7,color:'#E03131',weight:2,fillColor:'#E03131',fillOpacity:.35}).addTo(map);
+    pointNowcast(ll[0],ll[1]);
+  }catch(e){toast('Standort nicht freigegeben')}
+});
+
+/* ---------- Refetch beim Rauspannen ---------- */
+let moveT=null;
+map.on('moveend',()=>{
+  if(source!=='inca'||!fetchedBbox)return;
+  const c=map.getCenter();
+  const out=c.lat<fetchedBbox.s||c.lat>fetchedBbox.n||c.lng<fetchedBbox.w||c.lng>fetchedBbox.e;
+  if(!out)return;
+  clearTimeout(moveT);
+  moveT=setTimeout(()=>loadINCA().catch(()=>{}),700);
+});
+
+/* ---------- Boot ---------- */
+(async()=>{
+  try{await loadINCA()}
+  catch(e){
+    console.warn('INCA fehlgeschlagen:',e);
+    toast('GeoSphere nicht erreichbar – RainViewer-Fallback aktiv');
+    try{await loadRainViewer()}catch(e2){
+      $('rel').textContent='Keine Radardaten verfügbar';setPlaying(false)}
+  }
+  setInterval(()=>{(source==='inca'?loadINCA():loadRainViewer()).catch(()=>{})},600000);
+})();
+</script>
+</body>
+</html>
