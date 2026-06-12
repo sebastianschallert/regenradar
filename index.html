@@ -7,7 +7,6 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
-  /* ===== Swiss Utility · Token-Set ===== */
   :root{
     --paper:#F4F4F1; --card:#FFFFFF; --hair:#DDDDD6; --hair2:#E9E9E4;
     --ink:#141513; --gray:#70746F; --signal:#E03131;
@@ -17,14 +16,13 @@
   html,body{height:100%;background:var(--paper);font-family:var(--body);color:var(--ink);overflow:hidden}
   #map{position:fixed;inset:0;background:var(--paper)}
   .leaflet-container{background:var(--paper)}
-  .leaflet-image-layer{will-change:opacity}
   .leaflet-control-zoom{display:none}
   .leaflet-control-attribution{background:rgba(244,244,241,.75)!important;color:var(--gray)!important;font-size:9px!important}
   .leaflet-control-attribution a{color:var(--gray)!important}
+  .morphcanvas{pointer-events:none;opacity:.78}
 
-  /* ===== Preloader ===== */
   .splash{position:fixed;inset:0;z-index:3000;background:var(--paper);
-    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
     transition:opacity .45s ease}
   .splash.done{opacity:0;pointer-events:none}
   .splash h1{font-size:19px;font-weight:700;letter-spacing:-.01em}
@@ -37,7 +35,6 @@
   .splash .stat{font-size:10px;font-weight:500;color:var(--gray);letter-spacing:.1em;
     text-transform:uppercase;margin-top:14px;min-height:13px}
 
-  /* Header */
   .hdr{position:fixed;top:0;left:0;right:0;z-index:1000;display:flex;align-items:center;justify-content:space-between;
     padding:calc(env(safe-area-inset-top,0px) + 14px) 16px 16px;
     background:linear-gradient(var(--paper) 55%,rgba(244,244,241,0));pointer-events:none}
@@ -56,7 +53,6 @@
   .locbtn:active{transform:scale(.94)}
   .locbtn:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
 
-  /* Panel */
   .panel{position:fixed;left:0;right:0;bottom:0;z-index:1000;background:var(--card);
     border-top:1px solid var(--hair);
     padding:15px 16px calc(env(safe-area-inset-bottom,0px) + 16px)}
@@ -81,7 +77,6 @@
   .nc.rain .ncdot{background:var(--signal)}
   .nc b{color:var(--ink);font-weight:600}
 
-  /* Timeline: Tape — Nadel fix in der Mitte, Band läuft dahinter */
   .tl{margin-top:14px}
   .track{position:relative;height:54px;touch-action:none;cursor:grab;overflow:hidden;
     -webkit-mask-image:linear-gradient(90deg,transparent,#000 10%,#000 90%,transparent);
@@ -103,7 +98,6 @@
   .playhead::after{content:"";position:absolute;top:-5px;left:50%;transform:translateX(-50%);
     border:4px solid transparent;border-top:5px solid var(--signal)}
 
-  /* Legende */
   .legend{position:fixed;right:12px;top:50%;transform:translateY(-50%);z-index:999;
     background:var(--card);border:1px solid var(--hair);border-radius:4px;padding:10px 9px;
     display:flex;flex-direction:column;align-items:center;gap:6px}
@@ -127,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v3.1</div>
+  <div class="sub">GeoSphere Austria · INCA · v4</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -170,24 +164,18 @@
 
 <script>
 /* ============================================================
-   Regenradar AT — Swiss Utility · v3 "Ganz Österreich"
-   Architektur:
-   1) Preload: INCA-Daten für GANZ Österreich in 6 Längsstreifen
-      parallel laden → kompaktes Master-Raster im Speicher (~6 MB)
-   2) Preloader mit echtem Fortschritt, App erst sichtbar wenn fertig
-   3) Anzeige: sichtbarer Ausschnitt wird LOKAL aus dem Master
-      gerendert — Pan/Zoom durch ganz AT ohne weitere Netz-Anfragen
-   Daten: GeoSphere Austria (CC-BY 4.0) · Fallback RainViewer
+   Regenradar AT — Swiss Utility · v4 "Feld-Morphing"
+   Statt zwei fertige Bilder zu überblenden (Geister-Dissolve!)
+   wird das DATENFELD selbst interpoliert: pro Augenblick wird aus
+   advektiertem Frame A + B EIN Feld gemischt und daraus EIN Bild
+   mit scharfen Isokanten gezeichnet → Konturen verformen sich echt.
    ============================================================ */
 const GS_API='https://dataset.api.hub.geosphere.at/v1';
 const AT={s:46.0,w:9.2,n:49.4,e:17.6};
-const STRIPES=6;
-const MAX_FUTURE=21;          /* 21 × 15 min ≈ +5 h */
-const PAST_MIN=60;
-const END_HOLD=1300, LAYER_ALPHA=0.78;
+const STRIPES=6, MAX_FUTURE=21, PAST_MIN=60;
+const END_HOLD=1300;
 const REDUCED=matchMedia('(prefers-reduced-motion: reduce)').matches;
 const PPF=56;
-addEventListener('resize',()=>frames.length&&applyPos());
 
 const map=L.map('map',{zoomControl:false,fadeAnimation:false}).setView([48.175,16.38],10);
 L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{
@@ -220,20 +208,26 @@ function progSet(f,label){
 function splashDone(){const s=$('splash');s.classList.add('done');
   setTimeout(()=>s.style.display='none',500)}
 
-/* ---------- Intensitätsklassen ---------- */
+/* ---------- Klassen + Quantisierungs-LUT ---------- */
 const LEVELS=[0.05,0.2,0.5,1.0,2.5,5.0,10.0];
 const CLASS_RGBA=[null,
-  [147,167,201,85],
-  [62,143,243,200],
-  [35,98,210,210],
-  [63,72,204,215],
-  [124,58,237,222],
-  [224,49,49,230],
-  [122,18,18,235]];
+  [147,167,201,85],[62,143,243,200],[35,98,210,210],[63,72,204,215],
+  [124,58,237,222],[224,49,49,230],[122,18,18,235]];
 function levelFor(v){let l=0;for(let i=0;i<LEVELS.length;i++)if(v>=LEVELS[i])l=i+1;return l}
+const LUT=new Uint32Array(256);
+(function(){
+  const buf=new ArrayBuffer(4),u8=new Uint8Array(buf),u32=new Uint32Array(buf);
+  for(let g=0;g<256;g++){
+    const l=Math.round(g/32);
+    if(l<1){LUT[g]=0;continue}
+    const c=CLASS_RGBA[Math.min(l,7)];
+    u8[0]=c[0];u8[1]=c[1];u8[2]=c[2];u8[3]=c[3];
+    LUT[g]=u32[0];
+  }
+})();
 
 /* ---------- Master-Raster: ganz Österreich, 1 px ≈ 1 km ---------- */
-const M={gW:0,gH:0,timeMap:new Map(),times:[],grids:[]};
+const M={gW:0,gH:0,timeMap:new Map(),times:[],grids:[],motion:[]};
 (function(){
   const midCos=Math.cos((AT.s+AT.n)/2*Math.PI/180);
   M.gW=Math.round((AT.e-AT.w)*111.32*midCos);
@@ -274,8 +268,6 @@ async function pool(tasks,limit){
   await Promise.all(Array.from({length:Math.min(limit,tasks.length)},worker));
   return results;
 }
-
-/* ---------- Preload: ganz Österreich in Streifen ---------- */
 async function preloadAustria(showSplash){
   const stripes=[];
   for(let i=0;i<STRIPES;i++){
@@ -299,17 +291,13 @@ async function preloadAustria(showSplash){
   });
   if(showSplash)progInit(tasks.length+MAX_FUTURE,'Verbinde mit GeoSphere …');
   const res=await pool(tasks,3);
-  /* Prognose ist Pflicht: mindestens 1 Streifen muss da sein */
   const ncOk=res.slice(0,STRIPES).some(r=>r===true);
   if(!ncOk)throw(res[0]&&res[0].__err)||new Error('Prognose nicht ladbar');
   M.times=[...M.timeMap.keys()].sort((a,b)=>a-b);
   M.grids=M.times.map(t=>M.timeMap.get(t));
 }
 
-/* ---------- Zugrichtung schätzen (Block-Matching auf grobem Raster) ----------
-   Pro Frame-Paar: Verschiebung in km, die die Felder am besten zur Deckung
-   bringt. Beim Abspielen wandern beide Bilder entlang dieses Vektors →
-   der Regen "zieht", statt zu verschwinden und neu aufzutauchen. */
+/* ---------- Zugvektoren: grob 8 km → fein 2 km ---------- */
 function computeMotion(){
   const mkSmall=D=>{
     const sw=Math.floor(M.gW/D), sh=Math.floor(M.gH/D);
@@ -338,32 +326,52 @@ function computeMotion(){
   const C=mkSmall(8), F=mkSmall(2);
   M.motion=[];
   for(let j=0;j<M.grids.length-1;j++){
-    /* Grobstufe: 8-km-Schritte, ±32 km */
     let best=1e18,bx=0,by=0;
     for(let oy=-4;oy<=4;oy++)for(let ox=-4;ox<=4;ox++){
       const sc=sad(C.fr[j],C.fr[j+1],C.sw,C.sh,ox,oy,1);
       if(sc<best){best=sc;bx=ox;by=oy}
     }
-    /* Feinstufe: 2-km-Schritte rund um den Grobtreffer —
-       Regen zieht in 15 min meist nur 5–12 km, die Grobstufe
-       allein rundet das auf null (darum bewegte sich nichts) */
     let fb=1e18,fx=bx*4,fy=by*4;
     for(let oy=by*4-5;oy<=by*4+5;oy++)for(let ox=bx*4-5;ox<=bx*4+5;ox++){
       const sc=sad(F.fr[j],F.fr[j+1],F.sw,F.sh,ox,oy,2);
       if(sc<fb){fb=sc;fx=ox;fy=oy}
     }
-    M.motion.push({kx:fx*2,ky:fy*2});   /* km */
+    M.motion.push({kx:fx*2,ky:fy*2});
   }
 }
-const AT_MIDCOS=Math.cos((AT.s+AT.n)/2*Math.PI/180);
-function setShift(ov,kx,ky){
-  const b=ov._base;if(!b)return;
-  const dLat=-ky/111.32, dLon=kx/(111.32*AT_MIDCOS);
-  ov.setBounds([[b.bs+dLat,b.bw+dLon],[b.bn+dLat,b.be+dLon]]);
-}
 
-/* ---------- Viewport lokal aus dem Master rendern ---------- */
-function renderSlice(grid,gx0,gy0,gw,gh,S){
+/* ---------- Canvas-Layer (eine einzige Render-Fläche) ---------- */
+const MorphLayer=L.Layer.extend({
+  initialize(){this.canvas=document.createElement('canvas');
+    this.canvas.className='leaflet-image-layer leaflet-zoom-animated morphcanvas';
+    this._bounds=null},
+  onAdd(m){this._map=m;m.getPanes().overlayPane.appendChild(this.canvas);
+    m.on('zoom viewreset',this._reset,this);
+    m.on('zoomanim',this._anim,this);
+    this._reset()},
+  onRemove(m){m.getPanes().overlayPane.removeChild(this.canvas);
+    m.off('zoom viewreset',this._reset,this);
+    m.off('zoomanim',this._anim,this)},
+  setBounds(b){this._bounds=L.latLngBounds(b);if(this._map)this._reset()},
+  _reset(){
+    if(!this._bounds)return;
+    const tl=this._map.latLngToLayerPoint(this._bounds.getNorthWest());
+    const br=this._map.latLngToLayerPoint(this._bounds.getSouthEast());
+    L.DomUtil.setPosition(this.canvas,tl);
+    this.canvas.style.width=(br.x-tl.x)+'px';
+    this.canvas.style.height=(br.y-tl.y)+'px';
+  },
+  _anim(e){
+    if(!this._bounds)return;
+    const off=this._map._latLngBoundsToNewLayerBounds(this._bounds,e.zoom,e.center).min;
+    L.DomUtil.setTransform(this.canvas,off,this._map.getZoomScale(e.zoom));
+  }
+});
+const morphLayer=new MorphLayer();
+
+/* ---------- Viewport: geglättete Graustufen-Frames bauen ---------- */
+const V={cnvs:null,gw:0,gh:0,W:0,H:0,tmp:document.createElement('canvas')};
+function makeFieldCanvas(grid,gx0,gy0,gw,gh){
   const n=gw*gh;
   const a=new Float32Array(n), b=new Float32Array(n);
   for(let y=0;y<gh;y++)for(let x=0;x<gw;x++)
@@ -380,27 +388,12 @@ function renderSlice(grid,gx0,gy0,gw,gh,S){
   }
   for(let i=0;i<n;i++)a[i]=(b[Math.max(0,i-1)]+2*b[i]+b[Math.min(n-1,i+1)])*0.25;
   for(let i=0;i<n;i++)b[i]=(a[Math.max(0,i-gw)]+2*a[i]+a[Math.min(n-1,i+gw)])*0.25;
-  const small=document.createElement('canvas');small.width=gw;small.height=gh;
-  const sctx=small.getContext('2d');
-  const im=sctx.createImageData(gw,gh);
+  const c=document.createElement('canvas');c.width=gw;c.height=gh;
+  const ctx=c.getContext('2d');
+  const im=ctx.createImageData(gw,gh);
   for(let i=0;i<n;i++){im.data[i*4]=Math.min(255,b[i]*32);im.data[i*4+3]=255}
-  sctx.putImageData(im,0,0);
-  const W=gw*S,H=gh*S;
-  const out=document.createElement('canvas');out.width=W;out.height=H;
-  const octx=out.getContext('2d');
-  octx.imageSmoothingEnabled=true;octx.imageSmoothingQuality='high';
-  octx.drawImage(small,0,0,W,H);
-  const img=octx.getImageData(0,0,W,H),d=img.data;
-  for(let k=0;k<d.length;k+=4){
-    const l=Math.round(d[k]/32);
-    if(l<1){d[k+3]=0;continue}
-    const c=CLASS_RGBA[Math.min(l,7)];
-    d[k]=c[0];d[k+1]=c[1];d[k+2]=c[2];d[k+3]=c[3];
-  }
-  octx.putImageData(img,0,0);
-  const url=out.toDataURL();
-  small.width=small.height=0;out.width=out.height=0;
-  return url;
+  ctx.putImageData(im,0,0);
+  return c;
 }
 
 let frames=[],pos=0,playing=true,holdUntil=0,lastT=0;
@@ -411,60 +404,88 @@ const nowIdx=()=>{let k=0;frames.forEach((f,j)=>{if(!f.future)k=j});return k};
 async function renderView(showProgress){
   if(source!=='inca'||!M.grids.length)return;
   const token=++renderToken;
-  const b=map.getBounds(),pad=0.3;
-  let s=Math.max(AT.s,b.getSouth()-(b.getNorth()-b.getSouth())*pad);
-  let n=Math.min(AT.n,b.getNorth()+(b.getNorth()-b.getSouth())*pad);
-  let w=Math.max(AT.w,b.getWest()-(b.getEast()-b.getWest())*pad);
-  let e=Math.min(AT.e,b.getEast()+(b.getEast()-b.getWest())*pad);
-  let gx0=Math.max(0,Math.floor((w-AT.w)/(AT.e-AT.w)*M.gW));
-  let gy0=Math.max(0,Math.floor((AT.n-n)/(AT.n-AT.s)*M.gH));
-  let gx1=Math.min(M.gW,Math.ceil((e-AT.w)/(AT.e-AT.w)*M.gW));
-  let gy1=Math.min(M.gH,Math.ceil((AT.n-s)/(AT.n-AT.s)*M.gH));
+  const b=map.getBounds(),padY=(b.getNorth()-b.getSouth())*0.3,padX=(b.getEast()-b.getWest())*0.3;
+  const s=Math.max(AT.s,b.getSouth()-padY), n=Math.min(AT.n,b.getNorth()+padY);
+  const w=Math.max(AT.w,b.getWest()-padX), e=Math.min(AT.e,b.getEast()+padX);
+  const gx0=Math.max(0,Math.floor((w-AT.w)/(AT.e-AT.w)*M.gW));
+  const gy0=Math.max(0,Math.floor((AT.n-n)/(AT.n-AT.s)*M.gH));
+  const gx1=Math.min(M.gW,Math.ceil((e-AT.w)/(AT.e-AT.w)*M.gW));
+  const gy1=Math.min(M.gH,Math.ceil((AT.n-s)/(AT.n-AT.s)*M.gH));
   const gw=Math.max(8,gx1-gx0),gh=Math.max(8,gy1-gy0);
-  const S=Math.min(12,Math.max(2,Math.floor(700/Math.max(gw,gh))));
-  /* exakte Geo-Grenzen des Ausschnitts zurückrechnen */
+  const S=Math.min(10,Math.max(2,Math.floor(700/Math.max(gw,gh))));
   const bw=AT.w+gx0/M.gW*(AT.e-AT.w), be=AT.w+(gx0+gw)/M.gW*(AT.e-AT.w);
   const bn=AT.n-gy0/M.gH*(AT.n-AT.s), bs=AT.n-(gy0+gh)/M.gH*(AT.n-AT.s);
-  const bounds=[[bs,bw],[bn,be]];
 
-  const ni=nowIdx(),order=[ni];
-  for(let d=1;d<frames.length;d++){
-    if(ni+d<frames.length)order.push(ni+d);
-    if(ni-d>=0)order.push(ni-d);
-  }
-  const fresh=new Array(frames.length).fill(null);
-  for(const j of order){
-    if(token!==renderToken)return;          /* neuer Render gestartet → abbrechen */
-    const url=renderSlice(M.grids[j],gx0,gy0,gw,gh,S);
-    const ov=L.imageOverlay(url,bounds,{opacity:0,zIndex:200,interactive:false}).addTo(map);
-    ov._base={bs,bw,bn,be};
-    const old=frames[j].overlay;
-    frames[j].overlay=ov;fresh[j]=ov;
-    if(old)map.removeLayer(old);
-    if(j===ni)applyPos();
+  const cnvs=[];
+  for(let j=0;j<frames.length;j++){
+    if(token!==renderToken)return;
+    cnvs[j]=makeFieldCanvas(M.grids[j],gx0,gy0,gw,gh);
     if(showProgress)progTick('Rendere Radar …');
-    await raf();
+    if(j%4===3)await raf();
   }
-  renderedRect={gx0,gy0,gx1,gy1};
-  applyPos();
+  if(token!==renderToken)return;
+  V.cnvs=cnvs;V.gw=gw;V.gh=gh;V.W=gw*S;V.H=gh*S;
+  V.tmp.width=gw;V.tmp.height=gh;
+  morphLayer.canvas.width=V.W;morphLayer.canvas.height=V.H;
+  morphLayer.setBounds([[bs,bw],[bn,be]]);
+  if(!morphLayer._map)morphLayer.addTo(map);
+  renderedRect={gx0,gy0,gx1:gx0+gw,gy1:gy0+gh};
+  drawMorph(pos,true);
 }
 
-/* ---------- Crossfade-Engine (nur 2 sichtbare Layer) ---------- */
-let visA=-1,visB=-1;
+/* ---------- DER Morph: Feld interpolieren, EINMAL quantisieren ---------- */
+let lastDraw=0,trailT=null;
+function drawMorph(p,force){
+  if(!V.cnvs||!V.cnvs.length)return;
+  const now=performance.now();
+  if(!force&&now-lastDraw<30){
+    clearTimeout(trailT);trailT=setTimeout(()=>drawMorph(pos,true),35);
+    return;
+  }
+  lastDraw=now;
+  const nn=V.cnvs.length;
+  const i=Math.max(0,Math.min(nn-1,Math.floor(p))), f=Math.max(0,Math.min(1,p-i));
+  const t=V.tmp.getContext('2d');
+  t.globalCompositeOperation='source-over';
+  t.globalAlpha=1;
+  t.fillStyle='#000';t.fillRect(0,0,V.gw,V.gh);
+  t.globalCompositeOperation='lighter';
+  t.imageSmoothingEnabled=true;
+  const m=(M.motion[Math.min(i,M.motion.length-1)])||{kx:0,ky:0};
+  const adv=!REDUCED;
+  t.globalAlpha=1-f;
+  t.drawImage(V.cnvs[i],adv?f*m.kx:0,adv?f*m.ky:0);
+  if(f>0.001&&i+1<nn){
+    t.globalAlpha=f;
+    t.drawImage(V.cnvs[i+1],adv?-(1-f)*m.kx:0,adv?-(1-f)*m.ky:0);
+  }
+  t.globalAlpha=1;
+  const o=morphLayer.canvas.getContext('2d');
+  o.imageSmoothingEnabled=true;o.imageSmoothingQuality='high';
+  o.clearRect(0,0,V.W,V.H);
+  o.drawImage(V.tmp,0,0,V.W,V.H);
+  const img=o.getImageData(0,0,V.W,V.H);
+  const u8=img.data,u32=new Uint32Array(u8.buffer);
+  for(let k=0,K=V.W*V.H;k<K;k++)u32[k]=LUT[u8[k*4]];
+  o.putImageData(img,0,0);
+}
+
+/* ---------- Anzeige / Engine ---------- */
+let visA=-1,visB=-1;   /* nur für RainViewer-Fallback */
 function applyPos(){
   const n=frames.length;if(!n)return;
   pos=Math.max(0,Math.min(n-1,pos));
   const i=Math.floor(pos),f=pos-i;
-  if(visA!==-1&&visA!==i&&visA!==i+1&&frames[visA]&&frames[visA].overlay)frames[visA].overlay.setOpacity(0);
-  if(visB!==-1&&visB!==i&&visB!==i+1&&frames[visB]&&frames[visB].overlay)frames[visB].overlay.setOpacity(0);
-  if(frames[i].overlay)frames[i].overlay.setOpacity((1-f)*LAYER_ALPHA);
-  if(i+1<n&&frames[i+1].overlay)frames[i+1].overlay.setOpacity(f*LAYER_ALPHA);
-  if(source==='inca'&&!REDUCED&&M.motion&&M.motion.length){
-    const m=M.motion[Math.min(i,M.motion.length-1)];
-    if(frames[i].overlay)setShift(frames[i].overlay,m.kx*f,m.ky*f);
-    if(i+1<n&&frames[i+1].overlay)setShift(frames[i+1].overlay,-m.kx*(1-f),-m.ky*(1-f));
+  if(source==='inca'){
+    drawMorph(pos);
+  }else{
+    const LA=0.78;
+    if(visA!==-1&&visA!==i&&visA!==i+1&&frames[visA]&&frames[visA].overlay)frames[visA].overlay.setOpacity(0);
+    if(visB!==-1&&visB!==i&&visB!==i+1&&frames[visB]&&frames[visB].overlay)frames[visB].overlay.setOpacity(0);
+    if(frames[i].overlay)frames[i].overlay.setOpacity((1-f)*LA);
+    if(i+1<n&&frames[i+1].overlay)frames[i+1].overlay.setOpacity(f*LA);
+    visA=i;visB=i+1<n?i+1:-1;
   }
-  visA=i;visB=i+1<n?i+1:-1;
   const tA=frames[i].time,tB=frames[Math.min(i+1,n-1)].time;
   const t=tA+(tB-tA)*f;
   $('time').textContent=fmt(t);
@@ -480,6 +501,7 @@ function applyPos(){
   }
   $('strip').style.transform='translateX('+($('track').clientWidth/2-(pos+0.5)*PPF)+'px)';
 }
+addEventListener('resize',()=>frames.length&&applyPos());
 
 function loop(t){
   requestAnimationFrame(loop);
@@ -505,7 +527,11 @@ function setPlaying(p){playing=p;
 $('play').addEventListener('click',()=>setPlaying(!playing));
 $('jumpNow').addEventListener('click',()=>{pos=nowIdx();applyPos()});
 
-function clearFrames(){frames.forEach(f=>f.overlay&&map.removeLayer(f.overlay));frames=[];visA=visB=-1}
+function clearFrames(){
+  frames.forEach(f=>f.overlay&&map.removeLayer(f.overlay));
+  frames=[];visA=visB=-1;V.cnvs=null;
+  if(morphLayer._map)map.removeLayer(morphLayer);
+}
 
 /* ---------- Timeline-Band ---------- */
 function buildTimeline(){
@@ -550,7 +576,7 @@ track.addEventListener('pointerdown',e=>{
     applyPos();
   };
 });
-track.addEventListener('pointerup',()=>track.onpointermove=null);
+track.addEventListener('pointerup',()=>{track.onpointermove=null;applyPos()});
 track.addEventListener('pointercancel',()=>track.onpointermove=null);
 track.addEventListener('keydown',e=>{
   if(e.key==='ArrowRight'){setPlaying(false);pos=Math.min(frames.length-1,Math.floor(pos)+1);applyPos()}
@@ -573,7 +599,7 @@ async function loadRainViewer(){
   buildTimeline();pos=nowIdx();applyPos();
 }
 
-/* ---------- Punkt-Prognose am Standort ---------- */
+/* ---------- Punkt-Prognose ---------- */
 async function pointNowcast(lat,lon){
   try{
     const url=`${GS_API}/timeseries/forecast/nowcast-v1-15min-1km?parameters=rr&lat_lon=${lat.toFixed(4)},${lon.toFixed(4)}`;
@@ -616,7 +642,7 @@ $('locate').addEventListener('click',async()=>{
   }catch(e){toast('Standort nicht freigegeben')}
 });
 
-/* ---------- Neu rendern beim Pan/Zoom (rein lokal, kein Netz) ---------- */
+/* ---------- Neu rendern bei Pan/Zoom (lokal) ---------- */
 let moveT=null,lastZoom=map.getZoom();
 map.on('moveend',()=>{
   if(source!=='inca'||!renderedRect)return;
@@ -639,7 +665,6 @@ map.on('moveend',()=>{
   try{
     await preloadAustria(true);
     computeMotion();
-    /* Frames aus dem Master aufbauen */
     const NOW=Date.now()+60000;
     frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
     source='inca';
@@ -655,7 +680,6 @@ map.on('moveend',()=>{
     catch(e2){$('rel').textContent='Keine Radardaten verfügbar';setPlaying(false)}
     splashDone();
   }
-  /* alle 10 min im Hintergrund frische Daten (ohne Splash) */
   setInterval(async()=>{
     if(source!=='inca'){loadRainViewer().catch(()=>{});return}
     try{
@@ -664,9 +688,9 @@ map.on('moveend',()=>{
       computeMotion();
       const NOW=Date.now()+60000;
       const keep=pos-nowIdx();
-      clearFrames();
       frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
-      buildTimeline();pos=Math.max(0,Math.min(frames.length-1,nowIdx()+keep));
+      buildTimeline();
+      pos=Math.max(0,Math.min(frames.length-1,nowIdx()+keep));
       renderedRect=null;
       await renderView(false);
     }catch(e){}
