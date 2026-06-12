@@ -158,8 +158,8 @@
    ============================================================ */
 const GS_API='https://dataset.api.hub.geosphere.at/v1';
 const AT_BOUNDS={s:46.0,w:9.2,n:49.4,e:17.6};
-const MAX_SPAN={lat:1.6,lon:2.6};
-const MAX_FUTURE=25;          /* 25 × 15 min ≈ +6 h */
+const MAX_SPAN={lat:1.2,lon:2.0};
+const MAX_FUTURE=21;          /* 21 × 15 min ≈ +5 h */
 const PAST_MIN=90;            /* Rückblick-Fenster in Minuten */
 const END_HOLD=1300, LAYER_ALPHA=0.78;
 const REDUCED=matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -201,17 +201,17 @@ const CLASS_RGBA=[null,
   [122,18,18,235]];
 function levelFor(v){let l=0;for(let i=0;i<LEVELS.length;i++)if(v>=LEVELS[i])l=i+1;return l}
 
-/* ---------- Crossfade-Engine ---------- */
+/* ---------- Crossfade-Engine (fasst nur die 2 sichtbaren Layer an) ---------- */
+let visA=-1,visB=-1;
 function applyPos(){
   const n=frames.length;if(!n)return;
   pos=Math.max(0,Math.min(n-1,pos));
   const i=Math.floor(pos),f=pos-i;
-  for(let j=0;j<n;j++){
-    let o=0;
-    if(j===i)o=(1-f)*LAYER_ALPHA;
-    else if(j===i+1)o=f*LAYER_ALPHA;
-    frames[j].overlay.setOpacity(o);
-  }
+  if(visA!==-1&&visA!==i&&visA!==i+1&&frames[visA]&&frames[visA].overlay)frames[visA].overlay.setOpacity(0);
+  if(visB!==-1&&visB!==i&&visB!==i+1&&frames[visB]&&frames[visB].overlay)frames[visB].overlay.setOpacity(0);
+  if(frames[i].overlay)frames[i].overlay.setOpacity((1-f)*LAYER_ALPHA);
+  if(i+1<n&&frames[i+1].overlay)frames[i+1].overlay.setOpacity(f*LAYER_ALPHA);
+  visA=i;visB=i+1<n?i+1:-1;
   const tA=frames[i].time,tB=frames[Math.min(i+1,n-1)].time;
   const t=tA+(tB-tA)*f;
   $('time').textContent=fmt(t);
@@ -263,54 +263,83 @@ function currentBbox(){
   return{s:Math.max(s-pl,AT_BOUNDS.s),n:Math.min(n+pl,AT_BOUNDS.n),
          w:Math.max(w-po,AT_BOUNDS.w),e:Math.min(e+po,AT_BOUNDS.e)};
 }
-function clearFrames(){frames.forEach(f=>f.overlay&&map.removeLayer(f.overlay));frames=[]}
+function clearFrames(){frames.forEach(f=>f.overlay&&map.removeLayer(f.overlay));frames=[];visA=visB=-1}
 
-/* Renderer pro Datensatz — "Vektor-Look":
-   1) Intensitätslevel als Graustufen aufs Feld stempeln (Überlapp = Maximum)
-   2) weichzeichnen → organische, glatte Konturen
-   3) zurück in diskrete Klassen quantisieren → scharfe Isoflächen-Kanten */
-function makeRenderer(feats,bb){
+/* ---------- Daten → kompakte Level-Raster ----------
+   Statt 35 Riesen-Canvases (iOS-Speicherlimit!) halten wir pro Frame nur
+   ein Uint8-Raster (~Kilobytes) und rendern daraus kleine PNGs.
+   Glättung passiert in JS (Safari unterstützt ctx.filter-Blur nicht
+   zuverlässig – DAS war die Pixel-Ursache). */
+function gridGeometry(bb){
   const midCos=Math.cos((bb.s+bb.n)/2*Math.PI/180);
-  const kmW=(bb.e-bb.w)*111.32*midCos, kmH=(bb.n-bb.s)*111.32;
-  const ppk=Math.min(10,1400/kmW);                 /* Pixel pro km */
-  const W=Math.round(kmW*ppk), H=Math.round(kmH*ppk);
-  const xs=new Float32Array(feats.length), ys=new Float32Array(feats.length);
-  for(let i=0;i<feats.length;i++){
-    const c=feats[i].geometry.coordinates;
-    xs[i]=(c[0]-bb.w)/(bb.e-bb.w)*(W-1);
-    ys[i]=(bb.n-c[1])/(bb.n-bb.s)*(H-1);
-  }
-  const cell=Math.max(2,Math.ceil(ppk));           /* Stempel ≈ 1 Rasterzelle */
-  const blurPx=Math.max(1.5,ppk*0.9).toFixed(1);
-  return function(tIndex){
-    const field=document.createElement('canvas');field.width=W;field.height=H;
-    const fctx=field.getContext('2d');
-    fctx.globalCompositeOperation='lighten';
-    for(let i=0;i<feats.length;i++){
-      const v=feats[i].properties?.parameters?.rr?.data?.[tIndex];
-      if(v==null)continue;
-      const l=levelFor(v);if(!l)continue;
-      const g=l*32;
-      fctx.fillStyle='rgb('+g+','+g+','+g+')';
-      fctx.fillRect(xs[i]-cell/2,ys[i]-cell/2,cell+1,cell+1);
-    }
-    const out=document.createElement('canvas');out.width=W;out.height=H;
-    const octx=out.getContext('2d');
-    octx.filter='blur('+blurPx+'px)';
-    octx.drawImage(field,0,0);
-    octx.filter='none';
-    const img=octx.getImageData(0,0,W,H),d=img.data;
-    for(let k=0;k<d.length;k+=4){
-      const l=Math.round(d[k]/32);
-      if(l<1){d[k+3]=0;continue}
-      const c=CLASS_RGBA[Math.min(l,7)];
-      d[k]=c[0];d[k+1]=c[1];d[k+2]=c[2];d[k+3]=c[3];
-    }
-    octx.putImageData(img,0,0);
-    return L.imageOverlay(out.toDataURL(),[[bb.s,bb.w],[bb.n,bb.e]],
-      {opacity:0,zIndex:200,interactive:false}).addTo(map);
-  };
+  const gW=Math.max(8,Math.round((bb.e-bb.w)*111.32*midCos));  /* 1 px ≈ 1 km */
+  const gH=Math.max(8,Math.round((bb.n-bb.s)*111.32));
+  const S=Math.min(12,Math.max(2,Math.floor(640/Math.max(gW,gH))));
+  return{gW,gH,S};
 }
+
+function buildLevelGrids(gj,bb,gW,gH){
+  const feats=gj.features||[], times=(gj.timestamps||[]).map(Date.parse);
+  const grids=times.map(()=>new Uint8Array(gW*gH));
+  for(const ft of feats){
+    const c=ft.geometry.coordinates;
+    const x=Math.round((c[0]-bb.w)/(bb.e-bb.w)*(gW-1));
+    const y=Math.round((bb.n-c[1])/(bb.n-bb.s)*(gH-1));
+    if(x<0||y<0||x>=gW||y>=gH)continue;
+    const arr=ft.properties?.parameters?.rr?.data;if(!arr)continue;
+    const idx=y*gW+x;
+    for(let t=0;t<times.length;t++){
+      const v=arr[t];if(v==null)continue;
+      const l=levelFor(v);
+      if(l>grids[t][idx])grids[t][idx]=l;
+    }
+  }
+  return{times,grids};
+}
+
+/* Ein Frame: Lücken füllen, in JS glätten, bilinear hochskalieren,
+   quantisieren — Canvas-Speicher danach sofort freigeben */
+function renderLevelGrid(grid,bb,gW,gH,S){
+  const n=gW*gH;
+  const a=new Float32Array(n), b=new Float32Array(n);
+  for(let i=0;i<n;i++)a[i]=grid[i];
+  /* Projektionslücken mit Nachbar-Maximum auffüllen */
+  for(let y=0;y<gH;y++)for(let x=0;x<gW;x++){
+    const i=y*gW+x;
+    if(a[i]>0){b[i]=a[i];continue}
+    let m=0;
+    if(x>0&&a[i-1]>m)m=a[i-1];
+    if(x<gW-1&&a[i+1]>m)m=a[i+1];
+    if(y>0&&a[i-gW]>m)m=a[i-gW];
+    if(y<gH-1&&a[i+gW]>m)m=a[i+gW];
+    b[i]=m*0.6;
+  }
+  /* separabler [1,2,1]-Blur in JS → runde Konturen, Safari-sicher */
+  for(let i=0;i<n;i++)a[i]=(b[Math.max(0,i-1)]+2*b[i]+b[Math.min(n-1,i+1)])*0.25;
+  for(let i=0;i<n;i++)b[i]=(a[Math.max(0,i-gW)]+2*a[i]+a[Math.min(n-1,i+gW)])*0.25;
+  const small=document.createElement('canvas');small.width=gW;small.height=gH;
+  const sctx=small.getContext('2d');
+  const im=sctx.createImageData(gW,gH);
+  for(let i=0;i<n;i++){im.data[i*4]=Math.min(255,b[i]*32);im.data[i*4+3]=255}
+  sctx.putImageData(im,0,0);
+  const W=gW*S,H=gH*S;
+  const out=document.createElement('canvas');out.width=W;out.height=H;
+  const octx=out.getContext('2d');
+  octx.imageSmoothingEnabled=true;octx.imageSmoothingQuality='high';
+  octx.drawImage(small,0,0,W,H);
+  const img=octx.getImageData(0,0,W,H),d=img.data;
+  for(let k=0;k<d.length;k+=4){
+    const l=Math.round(d[k]/32);
+    if(l<1){d[k+3]=0;continue}
+    const c=CLASS_RGBA[Math.min(l,7)];
+    d[k]=c[0];d[k+1]=c[1];d[k+2]=c[2];d[k+3]=c[3];
+  }
+  octx.putImageData(img,0,0);
+  const url=out.toDataURL();
+  small.width=small.height=0;out.width=out.height=0;  /* iOS: Speicher sofort frei */
+  return url;
+}
+const raf=()=>new Promise(r=>requestAnimationFrame(r));
 
 async function fetchGrid(url){
   const res=await fetch(url);
@@ -320,42 +349,57 @@ async function fetchGrid(url){
   return gj;
 }
 
-/* ---------- INCA: Rückblick (optional) + Nowcast ---------- */
+/* ---------- INCA: Rückblick + Prognose, parallel geladen, progressiv gerendert ---------- */
 async function loadINCA(){
   const bb=currentBbox();
   const bboxStr=`${bb.s.toFixed(3)},${bb.w.toFixed(3)},${bb.n.toFixed(3)},${bb.e.toFixed(3)}`;
   $('track').classList.add('loading');
 
-  /* Nowcast (Pflicht) */
-  const nc=await fetchGrid(`${GS_API}/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox=${bboxStr}&output_format=geojson`);
+  /* beide Anfragen gleichzeitig; Rückblick darf leise scheitern */
+  const end=new Date(),start=new Date(Date.now()-PAST_MIN*60000);
+  const [ncRes,histRes]=await Promise.allSettled([
+    fetchGrid(`${GS_API}/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox=${bboxStr}&output_format=geojson`),
+    fetchGrid(`${GS_API}/grid/historical/inca-v1-15min-1km?parameters=rr&bbox=${bboxStr}`+
+      `&start=${start.toISOString().slice(0,16)}&end=${end.toISOString().slice(0,16)}&output_format=geojson`)
+  ]);
+  if(ncRes.status!=='fulfilled')throw ncRes.reason;
 
-  /* Rückblick (optional, scheitert leise wenn Datensatz nicht verfügbar) */
-  let hist=null;
-  try{
-    const end=new Date(),start=new Date(Date.now()-PAST_MIN*60000);
-    hist=await fetchGrid(`${GS_API}/grid/historical/inca-v1-15min-1km?parameters=rr&bbox=${bboxStr}`+
-      `&start=${start.toISOString().slice(0,16)}&end=${end.toISOString().slice(0,16)}&output_format=geojson`);
-  }catch(e){hist=null}
-
-  const nf=[];
-  const ncTimes=(nc.timestamps||[]).slice(0,MAX_FUTURE).map(Date.parse);
-  const rNC=makeRenderer(nc.features,bb);
-  if(hist){
-    const rHist=makeRenderer(hist.features,bb);
-    const ht=(hist.timestamps||[]).map(Date.parse);
-    for(let t=0;t<ht.length;t++){
-      if(ncTimes.length&&ht[t]>=ncTimes[0])continue;   /* Überlapp dedupen */
-      nf.push({time:ht[t],future:false,overlay:rHist(t)});
+  const{gW,gH,S}=gridGeometry(bb);
+  const ncL=buildLevelGrids(ncRes.value,bb,gW,gH);
+  const ncTimes=ncL.times.slice(0,MAX_FUTURE), ncGrids=ncL.grids.slice(0,MAX_FUTURE);
+  const entries=[];
+  if(histRes.status==='fulfilled'){
+    const hL=buildLevelGrids(histRes.value,bb,gW,gH);
+    for(let t=0;t<hL.times.length;t++){
+      if(ncTimes.length&&hL.times[t]>=ncTimes[0])continue;   /* Überlapp dedupen */
+      entries.push({time:hL.times[t],grid:hL.grids[t]});
     }
   }
+  for(let t=0;t<ncTimes.length;t++)entries.push({time:ncTimes[t],grid:ncGrids[t]});
+  if(!entries.length)throw new Error('leere Antwort');
+
+  const wasPlaying=playing;setPlaying(false);
+  clearFrames();
   const NOW=Date.now()+60000;
-  for(let t=0;t<ncTimes.length;t++){
-    nf.push({time:ncTimes[t],future:ncTimes[t]>NOW,overlay:rNC(t)});
-  }
-  clearFrames();frames=nf;
+  frames=entries.map(e=>({time:e.time,future:e.time>NOW,overlay:null}));
   fetchedBbox=bb;source='inca';
   $('srcTxt').textContent='LIVE · INCA';$('liveBadge').classList.remove('off');
-  buildTimeline();pos=nowIdx();applyPos();
+  buildTimeline();pos=nowIdx();
+
+  /* progressiv: zuerst das Jetzt-Bild, dann von dort nach außen */
+  const ni=nowIdx(),order=[ni];
+  for(let d=1;d<frames.length;d++){
+    if(ni+d<frames.length)order.push(ni+d);
+    if(ni-d>=0)order.push(ni-d);
+  }
+  for(const j of order){
+    const url=renderLevelGrid(entries[j].grid,bb,gW,gH,S);
+    frames[j].overlay=L.imageOverlay(url,[[bb.s,bb.w],[bb.n,bb.e]],
+      {opacity:0,zIndex:200,interactive:false}).addTo(map);
+    if(j===ni)applyPos();             /* erstes Bild sofort zeigen */
+    await raf();
+  }
+  applyPos();setPlaying(wasPlaying);
 }
 
 /* ---------- Fallback: RainViewer ---------- */
