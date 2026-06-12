@@ -121,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v4.3</div>
+  <div class="sub">GeoSphere Austria · INCA · v4.4</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -161,6 +161,141 @@
 </div>
 
 <div class="toast" id="toast"></div>
+
+<script id="wsrc" type="text/worker">
+/* Daten-Worker: fetch + JSON.parse + Raster + Zugvektoren — alles
+   abseits des Haupt-Threads, damit die Animation nie einfriert */
+const GS='https://dataset.api.hub.geosphere.at/v1';
+const AT={s:46.0,w:9.2,n:49.4,e:17.6};
+const STRIPES=6, MAXF=21, PASTMIN=60;
+const midCos=Math.cos((AT.s+AT.n)/2*Math.PI/180);
+const gW=Math.round((AT.e-AT.w)*111.32*midCos);
+const gH=Math.round((AT.n-AT.s)*111.32);
+const LEVELS=[0.05,0.2,0.5,1.0,2.5,5.0,10.0];
+function levelFor(v){let l=0;for(let i=0;i<LEVELS.length;i++)if(v>=LEVELS[i])l=i+1;return l}
+function writeStripe(timeMap,gj,limit){
+  const times=(gj.timestamps||[]).slice(0,limit||Infinity).map(Date.parse);
+  const grids=times.map(t=>{
+    let g=timeMap.get(t);
+    if(!g){g=new Uint8Array(gW*gH);timeMap.set(t,g)}
+    return g;
+  });
+  for(const ft of gj.features||[]){
+    const c=ft.geometry.coordinates;
+    const x=Math.round((c[0]-AT.w)/(AT.e-AT.w)*(gW-1));
+    const y=Math.round((AT.n-c[1])/(AT.n-AT.s)*(gH-1));
+    if(x<0||y<0||x>=gW||y>=gH)continue;
+    const arr=ft.properties&&ft.properties.parameters&&ft.properties.parameters.rr&&ft.properties.parameters.rr.data;
+    if(!arr)continue;
+    const idx=y*gW+x;
+    for(let t=0;t<times.length;t++){
+      const v=arr[t];if(v==null)continue;
+      const l=levelFor(v);
+      if(l>grids[t][idx])grids[t][idx]=l;
+    }
+  }
+}
+async function fetchGrid(url){
+  const res=await fetch(url);
+  if(!res.ok)throw new Error('HTTP '+res.status);
+  return res.json();
+}
+async function pool(tasks,limit){
+  const results=[];let i=0;
+  async function workerFn(){
+    while(i<tasks.length){const j=i++;results[j]=await tasks[j]().catch(e=>({__err:e}))}
+  }
+  await Promise.all(Array.from({length:Math.min(limit,tasks.length)},workerFn));
+  return results;
+}
+function computeMotion(GR){
+  const mkSmall=D=>{
+    const sw=Math.floor(gW/D), sh=Math.floor(gH/D);
+    return{sw,sh,fr:GR.map(g=>{
+      const sm=new Float32Array(sw*sh);
+      for(let y=0;y<sh;y++)for(let x=0;x<sw;x++){
+        let sum=0;
+        for(let dy=0;dy<D;dy++)for(let dx=0;dx<D;dx++)
+          sum+=g[(y*D+dy)*gW+(x*D+dx)];
+        sm[y*sw+x]=sum;
+      }
+      return sm;
+    })};
+  };
+  const sad=(A,B,sw,sh,ox,oy,stride)=>{
+    let s=0,cnt=0;
+    const y0=Math.max(0,-oy),y1=sh-Math.max(0,oy);
+    const x0=Math.max(0,-ox),x1=sw-Math.max(0,ox);
+    for(let y=y0;y<y1;y+=stride)for(let x=x0;x<x1;x+=stride){
+      const a=A[y*sw+x],b=B[(y+oy)*sw+(x+ox)];
+      if(a===0&&b===0)continue;
+      s+=Math.abs(a-b);cnt++;
+    }
+    return cnt<30?1e18:s/cnt;
+  };
+  const C=mkSmall(8), F=mkSmall(2);
+  const motion=[];
+  for(let j=0;j<GR.length-1;j++){
+    let best=1e18,bx=0,by=0;
+    for(let oy=-4;oy<=4;oy++)for(let ox=-4;ox<=4;ox++){
+      const sc=sad(C.fr[j],C.fr[j+1],C.sw,C.sh,ox,oy,1);
+      if(sc<best){best=sc;bx=ox;by=oy}
+    }
+    let fb=1e18,fx=bx*4,fy=by*4;
+    for(let oy=by*4-5;oy<=by*4+5;oy++)for(let ox=bx*4-5;ox<=bx*4+5;ox++){
+      const sc=sad(F.fr[j],F.fr[j+1],F.sw,F.sh,ox,oy,2);
+      if(sc<fb){fb=sc;fx=ox;fy=oy}
+    }
+    motion.push({kx:fx*2,ky:fy*2});
+  }
+  return motion;
+}
+function smoothMotion(mo){
+  return mo.map((m,j)=>{
+    const a=mo[Math.max(0,j-1)],b=mo[Math.min(mo.length-1,j+1)];
+    let kx=(a.kx+2*m.kx+b.kx)/4, ky=(a.ky+2*m.ky+b.ky)/4;
+    const mag=Math.hypot(kx,ky);
+    if(mag>30){kx*=30/mag;ky*=30/mag}
+    return{kx,ky};
+  });
+}
+self.onmessage=async e=>{
+  if(e.data.cmd!=='load')return;
+  try{
+    const timeMap=new Map();
+    const stripes=[];
+    for(let i=0;i<STRIPES;i++){
+      const w=AT.w+(AT.e-AT.w)*i/STRIPES, ee=AT.w+(AT.e-AT.w)*(i+1)/STRIPES;
+      stripes.push(AT.s+','+w.toFixed(3)+','+AT.n+','+ee.toFixed(3));
+    }
+    const end=new Date(),start=new Date(Date.now()-PASTMIN*60000);
+    const tasks=[];
+    for(const bb of stripes)tasks.push(async()=>{
+      const gj=await fetchGrid(GS+'/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox='+bb+'&output_format=geojson');
+      writeStripe(timeMap,gj,MAXF);
+      self.postMessage({type:'prog',label:'Lade Prognose …'});
+      return true;
+    });
+    for(const bb of stripes)tasks.push(async()=>{
+      const gj=await fetchGrid(GS+'/grid/historical/inca-v1-15min-1km?parameters=rr&bbox='+bb+
+        '&start='+start.toISOString().slice(0,16)+'&end='+end.toISOString().slice(0,16)+'&output_format=geojson');
+      writeStripe(timeMap,gj);
+      self.postMessage({type:'prog',label:'Lade Rückblick …'});
+      return true;
+    });
+    const res=await pool(tasks,3);
+    const ncOk=res.slice(0,STRIPES).some(r=>r===true);
+    if(!ncOk)throw new Error('Prognose nicht ladbar');
+    const times=[...timeMap.keys()].sort((a,b)=>a-b);
+    const grids=times.map(t=>timeMap.get(t));
+    const motion=smoothMotion(computeMotion(grids));
+    const bufs=grids.map(g=>g.buffer);
+    self.postMessage({type:'done',times,grids:bufs,motion},bufs);
+  }catch(err){
+    self.postMessage({type:'err',msg:String((err&&err.message)||err)});
+  }
+};
+</script>
 
 <script>
 /* ============================================================
@@ -226,131 +361,37 @@ const LUT=new Uint32Array(256);
   }
 })();
 
-/* ---------- Master-Raster: ganz Österreich, 1 px ≈ 1 km ---------- */
-const M={gW:0,gH:0,timeMap:new Map(),times:[],grids:[],motion:[]};
+/* ---------- Master-Raster-Geometrie (1 px ≈ 1 km) ---------- */
+const M={gW:0,gH:0,times:[],grids:[],motion:[]};
 (function(){
   const midCos=Math.cos((AT.s+AT.n)/2*Math.PI/180);
   M.gW=Math.round((AT.e-AT.w)*111.32*midCos);
   M.gH=Math.round((AT.n-AT.s)*111.32);
 })();
-function gridOf(timeMs){
-  let g=M.timeMap.get(timeMs);
-  if(!g){g=new Uint8Array(M.gW*M.gH);M.timeMap.set(timeMs,g)}
-  return g;
-}
-function writeStripe(gj,limit){
-  const times=(gj.timestamps||[]).slice(0,limit||Infinity).map(Date.parse);
-  const grids=times.map(gridOf);
-  for(const ft of gj.features||[]){
-    const c=ft.geometry.coordinates;
-    const x=Math.round((c[0]-AT.w)/(AT.e-AT.w)*(M.gW-1));
-    const y=Math.round((AT.n-c[1])/(AT.n-AT.s)*(M.gH-1));
-    if(x<0||y<0||x>=M.gW||y>=M.gH)continue;
-    const arr=ft.properties?.parameters?.rr?.data;if(!arr)continue;
-    const idx=y*M.gW+x;
-    for(let t=0;t<times.length;t++){
-      const v=arr[t];if(v==null)continue;
-      const l=levelFor(v);
-      if(l>grids[t][idx])grids[t][idx]=l;
-    }
-  }
-}
-async function fetchGrid(url){
-  const res=await fetch(url);
-  if(!res.ok)throw new Error('HTTP '+res.status);
-  return res.json();
-}
-async function pool(tasks,limit){
-  const results=[];let i=0;
-  async function worker(){
-    while(i<tasks.length){const j=i++;results[j]=await tasks[j]().catch(e=>({__err:e}))}
-  }
-  await Promise.all(Array.from({length:Math.min(limit,tasks.length)},worker));
-  return results;
-}
-async function preloadAustria(showSplash){
-  const stripes=[];
-  for(let i=0;i<STRIPES;i++){
-    const w=AT.w+(AT.e-AT.w)*i/STRIPES, e=AT.w+(AT.e-AT.w)*(i+1)/STRIPES;
-    stripes.push(`${AT.s},${w.toFixed(3)},${AT.n},${e.toFixed(3)}`);
-  }
-  const end=new Date(),start=new Date(Date.now()-PAST_MIN*60000);
-  const tasks=[];
-  for(const bb of stripes)tasks.push(async()=>{
-    const gj=await fetchGrid(`${GS_API}/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox=${bb}&output_format=geojson`);
-    writeStripe(gj,MAX_FUTURE);
-    if(showSplash)progTick('Lade Prognose …');
-    return true;
-  });
-  for(const bb of stripes)tasks.push(async()=>{
-    const gj=await fetchGrid(`${GS_API}/grid/historical/inca-v1-15min-1km?parameters=rr&bbox=${bb}`+
-      `&start=${start.toISOString().slice(0,16)}&end=${end.toISOString().slice(0,16)}&output_format=geojson`);
-    writeStripe(gj);
-    if(showSplash)progTick('Lade Rückblick …');
-    return true;
-  });
-  if(showSplash)progInit(tasks.length+MAX_FUTURE,'Verbinde mit GeoSphere …');
-  const res=await pool(tasks,3);
-  const ncOk=res.slice(0,STRIPES).some(r=>r===true);
-  if(!ncOk)throw(res[0]&&res[0].__err)||new Error('Prognose nicht ladbar');
-  const times=[...M.timeMap.keys()].sort((a,b)=>a-b);
-  return{times,grids:times.map(t=>M.timeMap.get(t))};
-}
 
-/* ---------- Zugvektoren: grob 8 km → fein 2 km ---------- */
-function computeMotion(GR){
-  const mkSmall=D=>{
-    const sw=Math.floor(M.gW/D), sh=Math.floor(M.gH/D);
-    return{sw,sh,fr:GR.map(g=>{
-      const sm=new Float32Array(sw*sh);
-      for(let y=0;y<sh;y++)for(let x=0;x<sw;x++){
-        let sum=0;
-        for(let dy=0;dy<D;dy++)for(let dx=0;dx<D;dx++)
-          sum+=g[(y*D+dy)*M.gW+(x*D+dx)];
-        sm[y*sw+x]=sum;
+/* ---------- Daten-Worker ----------
+   Das JSON-Parsen von vielen MB fror den Haupt-Thread ein →
+   sichtbares Stocken/Springen bei jedem Refresh. Die komplette
+   Schwerarbeit (fetch, parse, Raster, Vektoren) läuft jetzt im
+   Web Worker, das UI bekommt nur fertige Typed Arrays. */
+const worker=new Worker(URL.createObjectURL(
+  new Blob([document.getElementById('wsrc').textContent],{type:'text/javascript'})));
+function preloadAustria(showSplash){
+  if(showSplash)progInit(STRIPES*2+MAX_FUTURE,'Verbinde mit GeoSphere …');
+  return new Promise((resolve,reject)=>{
+    const onMsg=e=>{
+      const d=e.data;
+      if(d.type==='prog'){if(showSplash)progTick(d.label)}
+      else if(d.type==='done'){
+        worker.removeEventListener('message',onMsg);
+        resolve({times:d.times,grids:d.grids.map(b=>new Uint8Array(b)),motion:d.motion});
+      }else if(d.type==='err'){
+        worker.removeEventListener('message',onMsg);
+        reject(new Error(d.msg));
       }
-      return sm;
-    })};
-  };
-  const sad=(A,B,sw,sh,ox,oy,stride)=>{
-    let s=0,cnt=0;
-    const y0=Math.max(0,-oy),y1=sh-Math.max(0,oy);
-    const x0=Math.max(0,-ox),x1=sw-Math.max(0,ox);
-    for(let y=y0;y<y1;y+=stride)for(let x=x0;x<x1;x+=stride){
-      const a=A[y*sw+x],b=B[(y+oy)*sw+(x+ox)];
-      if(a===0&&b===0)continue;
-      s+=Math.abs(a-b);cnt++;
-    }
-    return cnt<30?1e18:s/cnt;
-  };
-  const C=mkSmall(8), F=mkSmall(2);
-  const motion=[];
-  for(let j=0;j<GR.length-1;j++){
-    let best=1e18,bx=0,by=0;
-    for(let oy=-4;oy<=4;oy++)for(let ox=-4;ox<=4;ox++){
-      const sc=sad(C.fr[j],C.fr[j+1],C.sw,C.sh,ox,oy,1);
-      if(sc<best){best=sc;bx=ox;by=oy}
-    }
-    let fb=1e18,fx=bx*4,fy=by*4;
-    for(let oy=by*4-5;oy<=by*4+5;oy++)for(let ox=bx*4-5;ox<=bx*4+5;ox++){
-      const sc=sad(F.fr[j],F.fr[j+1],F.sw,F.sh,ox,oy,2);
-      if(sc<fb){fb=sc;fx=ox;fy=oy}
-    }
-    motion.push({kx:fx*2,ky:fy*2});
-  }
-  return motion;
-}
-
-/* Zugvektoren über Nachbar-Frames glätten und auf plausible
-   Geschwindigkeit begrenzen — verrauschte Einzelschätzungen ließen
-   das ganze Feld pro Segment unterschiedlich "lurchen" */
-function smoothMotion(mo){
-  return mo.map((m,j)=>{
-    const a=mo[Math.max(0,j-1)],b=mo[Math.min(mo.length-1,j+1)];
-    let kx=(a.kx+2*m.kx+b.kx)/4, ky=(a.ky+2*m.ky+b.ky)/4;
-    const mag=Math.hypot(kx,ky);
-    if(mag>30){kx*=30/mag;ky*=30/mag}   /* >120 km/h unplausibel */
-    return{kx,ky};
+    };
+    worker.addEventListener('message',onMsg);
+    worker.postMessage({cmd:'load'});
   });
 }
 
@@ -731,8 +772,7 @@ map.on('moveend',()=>{
 (async()=>{
   try{
     const d0=await preloadAustria(true);
-    M.times=d0.times;M.grids=d0.grids;
-    M.motion=smoothMotion(computeMotion(M.grids));
+    M.times=d0.times;M.grids=d0.grids;M.motion=d0.motion;
     const NOW=Date.now()+60000;
     frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
     source='inca';
@@ -751,9 +791,8 @@ map.on('moveend',()=>{
   setInterval(async()=>{
     if(source!=='inca'){loadRainViewer().catch(()=>{});return}
     try{
-      M.timeMap.clear();
       const d=await preloadAustria(false);
-      const motion=smoothMotion(computeMotion(d.grids));
+      const motion=d.motion;
       let cnvs=null;const geo=V.geo;
       if(geo){
         cnvs=[];
