@@ -306,6 +306,49 @@ async function preloadAustria(showSplash){
   M.grids=M.times.map(t=>M.timeMap.get(t));
 }
 
+/* ---------- Zugrichtung schätzen (Block-Matching auf grobem Raster) ----------
+   Pro Frame-Paar: Verschiebung in km, die die Felder am besten zur Deckung
+   bringt. Beim Abspielen wandern beide Bilder entlang dieses Vektors →
+   der Regen "zieht", statt zu verschwinden und neu aufzutauchen. */
+function computeMotion(){
+  const D=8, sw=Math.floor(M.gW/D), sh=Math.floor(M.gH/D);
+  const small=M.grids.map(g=>{
+    const sm=new Float32Array(sw*sh);
+    for(let y=0;y<sh;y++)for(let x=0;x<sw;x++){
+      let sum=0;
+      for(let dy=0;dy<D;dy++)for(let dx=0;dx<D;dx++)
+        sum+=g[(y*D+dy)*M.gW+(x*D+dx)];
+      sm[y*sw+x]=sum;
+    }
+    return sm;
+  });
+  M.motion=[];
+  for(let j=0;j<M.grids.length-1;j++){
+    const A=small[j],B=small[j+1];
+    let best=1e18,bx=0,by=0;
+    for(let oy=-5;oy<=5;oy++)for(let ox=-5;ox<=5;ox++){
+      let sad=0,cnt=0;
+      const y0=Math.max(0,-oy),y1=sh-Math.max(0,oy);
+      const x0=Math.max(0,-ox),x1=sw-Math.max(0,ox);
+      for(let y=y0;y<y1;y++)for(let x=x0;x<x1;x++){
+        const a=A[y*sw+x],bv=B[(y+oy)*sw+(x+ox)];
+        if(a===0&&bv===0)continue;
+        sad+=Math.abs(a-bv);cnt++;
+      }
+      if(cnt<50)continue;
+      const score=sad/cnt;
+      if(score<best){best=score;bx=ox;by=oy}
+    }
+    M.motion.push({kx:bx*D,ky:by*D});   /* km, 1 Master-px ≈ 1 km */
+  }
+}
+const AT_MIDCOS=Math.cos((AT.s+AT.n)/2*Math.PI/180);
+function setShift(ov,kx,ky){
+  const b=ov._base;if(!b)return;
+  const dLat=-ky/111.32, dLon=kx/(111.32*AT_MIDCOS);
+  ov.setBounds([[b.bs+dLat,b.bw+dLon],[b.bn+dLat,b.be+dLon]]);
+}
+
 /* ---------- Viewport lokal aus dem Master rendern ---------- */
 function renderSlice(grid,gx0,gy0,gw,gh,S){
   const n=gw*gh;
@@ -381,6 +424,7 @@ async function renderView(showProgress){
     if(token!==renderToken)return;          /* neuer Render gestartet → abbrechen */
     const url=renderSlice(M.grids[j],gx0,gy0,gw,gh,S);
     const ov=L.imageOverlay(url,bounds,{opacity:0,zIndex:200,interactive:false}).addTo(map);
+    ov._base={bs,bw,bn,be};
     const old=frames[j].overlay;
     frames[j].overlay=ov;fresh[j]=ov;
     if(old)map.removeLayer(old);
@@ -402,6 +446,11 @@ function applyPos(){
   if(visB!==-1&&visB!==i&&visB!==i+1&&frames[visB]&&frames[visB].overlay)frames[visB].overlay.setOpacity(0);
   if(frames[i].overlay)frames[i].overlay.setOpacity((1-f)*LAYER_ALPHA);
   if(i+1<n&&frames[i+1].overlay)frames[i+1].overlay.setOpacity(f*LAYER_ALPHA);
+  if(source==='inca'&&!REDUCED&&M.motion&&M.motion.length){
+    const m=M.motion[Math.min(i,M.motion.length-1)];
+    if(frames[i].overlay)setShift(frames[i].overlay,m.kx*f,m.ky*f);
+    if(i+1<n&&frames[i+1].overlay)setShift(frames[i+1].overlay,-m.kx*(1-f),-m.ky*(1-f));
+  }
   visA=i;visB=i+1<n?i+1:-1;
   const tA=frames[i].time,tB=frames[Math.min(i+1,n-1)].time;
   const t=tA+(tB-tA)*f;
@@ -576,6 +625,7 @@ map.on('moveend',()=>{
 (async()=>{
   try{
     await preloadAustria(true);
+    computeMotion();
     /* Frames aus dem Master aufbauen */
     const NOW=Date.now()+60000;
     frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
@@ -598,6 +648,7 @@ map.on('moveend',()=>{
     try{
       M.timeMap.clear();
       await preloadAustria(false);
+      computeMotion();
       const NOW=Date.now()+60000;
       const keep=pos-nowIdx();
       clearFrames();
