@@ -121,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v4.2</div>
+  <div class="sub">GeoSphere Austria · INCA · v4.3</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -449,7 +449,7 @@ async function renderView(showProgress){
 }
 
 /* ---------- DER Morph: Feld interpolieren, EINMAL quantisieren ---------- */
-let drawCost=6,skipBeat=0;
+let drawCost=6,skipBeat=0,fadeSnap=null;
 function drawMorph(p,force){
   if(!V.cnvs||!V.cnvs.length)return;
   /* Gleichmäßigkeit schlägt Rate: bei teurem Frame stabil JEDEN
@@ -466,11 +466,21 @@ function drawMorph(p,force){
   t.imageSmoothingEnabled=true;
   const m=(M.motion[Math.min(i,M.motion.length-1)])||{kx:0,ky:0};
   const adv=!REDUCED;
-  t.globalAlpha=1-f;
+  let w=0;                       /* Gewicht des alten Datenstands */
+  if(fadeSnap){
+    w=(fadeSnap.until-performance.now())/800;
+    if(w<=0){fadeSnap=null;w=0}
+  }
+  t.globalAlpha=(1-f)*(1-w);
   t.drawImage(V.cnvs[i],adv?f*m.kx:0,adv?f*m.ky:0);
   if(f>0.001&&i+1<nn){
-    t.globalAlpha=f;
+    t.globalAlpha=f*(1-w);
     t.drawImage(V.cnvs[i+1],adv?-(1-f)*m.kx:0,adv?-(1-f)*m.ky:0);
+  }
+  if(w>0&&fadeSnap){
+    t.globalAlpha=w;
+    t.drawImage(fadeSnap.cnv,0,0);
+    requestAnimationFrame(()=>drawMorph(pos,true));  /* auch pausiert weiterblenden */
   }
   t.globalAlpha=1;
   const o=morphLayer.canvas.getContext('2d');
@@ -529,24 +539,32 @@ function posForTime(t){
 /* Frische Daten werden NICHT mitten in der Animation getauscht, sondern
    am Schleifenende (natürlicher Schnitt). Die Position wird über die
    UHRZEIT statt den Frame-Index erhalten → kein Springen mehr. */
-function commitRefresh(){
+function commitRefresh(atWrap){
   if(!pendingRefresh)return;
   const pr=pendingRefresh;pendingRefresh=null;
-  const i=Math.floor(pos),f=pos-i;
-  const tDisp=frames.length
-    ?frames[i].time+(frames[Math.min(i+1,frames.length-1)].time-frames[i].time)*f
-    :Date.now();
+  let tDisp=null;
+  if(!atWrap&&frames.length){
+    const i=Math.floor(pos),f=pos-i;
+    tDisp=frames[i].time+(frames[Math.min(i+1,frames.length-1)].time-frames[i].time)*f;
+    /* aktuelles Feld als Schnappschuss → weiche Ablöse statt Hard-Cut */
+    if(V.cnvs){
+      drawMorph(pos,true);
+      const sn=document.createElement('canvas');sn.width=V.gw;sn.height=V.gh;
+      sn.getContext('2d').drawImage(V.tmp,0,0);
+      fadeSnap={cnv:sn,until:performance.now()+800};
+    }
+  }
   M.times=pr.times;M.grids=pr.grids;M.motion=pr.motion;
   const NOW=Date.now()+60000;
   frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
   buildTimeline();
-  pos=posForTime(tDisp);
+  if(tDisp!=null)pos=posForTime(tDisp);
   const sameGeo=pr.cnvs&&pr.geo&&V.geo&&
     pr.geo.gx0===V.geo.gx0&&pr.geo.gy0===V.geo.gy0&&
     pr.geo.gw===V.geo.gw&&pr.geo.gh===V.geo.gh&&pr.geo.S===V.geo.S;
   if(sameGeo){
-    V.cnvs=pr.cnvs;          /* reiner Zeiger-Tausch, kein Rendern nötig */
-    drawMorph(pos,true);
+    V.cnvs=pr.cnvs;
+    if(!atWrap)drawMorph(pos,true);   /* am Schleifenende zeichnet der nächste Takt Frame 0 */
   }else{
     renderedRect=null;
     renderView(false);
@@ -560,11 +578,11 @@ function loop(t){
   if(REDUCED){
     loop._acc=(loop._acc||0)+dt;
     if(loop._acc>=frameMs()){loop._acc=0;pos=Math.floor(pos)+1;
-      if(pos>frames.length-1){commitRefresh();pos=0;holdUntil=t+END_HOLD}}
+      if(pos>frames.length-1){pos=0;commitRefresh(true);holdUntil=t+END_HOLD}}
   }else{
     pos+=dt/frameMs();
     if(pos>=frames.length-1){pos=frames.length-1;applyPos();holdUntil=t+END_HOLD;
-      setTimeout(()=>{if(playing){commitRefresh();pos=0}},END_HOLD);return}
+      setTimeout(()=>{if(playing){pos=0;commitRefresh(true)}},END_HOLD);return}
   }
   applyPos();
 }
