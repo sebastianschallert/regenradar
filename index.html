@@ -22,6 +22,21 @@
   .leaflet-control-attribution{background:rgba(244,244,241,.75)!important;color:var(--gray)!important;font-size:9px!important}
   .leaflet-control-attribution a{color:var(--gray)!important}
 
+  /* ===== Preloader ===== */
+  .splash{position:fixed;inset:0;z-index:3000;background:var(--paper);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;
+    transition:opacity .45s ease}
+  .splash.done{opacity:0;pointer-events:none}
+  .splash h1{font-size:19px;font-weight:700;letter-spacing:-.01em}
+  .splash .sub{font-size:10px;font-weight:500;color:var(--gray);letter-spacing:.14em;
+    text-transform:uppercase;margin-top:6px}
+  .splash .pct{font-size:54px;font-weight:700;font-variant-numeric:tabular-nums;
+    letter-spacing:-.02em;margin-top:42px;line-height:1}
+  .splash .bar{width:min(280px,70vw);height:6px;background:var(--hair2);margin-top:18px;position:relative}
+  .splash .bar i{position:absolute;left:0;top:0;bottom:0;width:0%;background:var(--signal);transition:width .25s ease}
+  .splash .stat{font-size:10px;font-weight:500;color:var(--gray);letter-spacing:.1em;
+    text-transform:uppercase;margin-top:14px;min-height:13px}
+
   /* Header */
   .hdr{position:fixed;top:0;left:0;right:0;z-index:1000;display:flex;align-items:center;justify-content:space-between;
     padding:calc(env(safe-area-inset-top,0px) + 14px) 16px 16px;
@@ -72,10 +87,6 @@
     -webkit-mask-image:linear-gradient(90deg,transparent,#000 10%,#000 90%,transparent);
     mask-image:linear-gradient(90deg,transparent,#000 10%,#000 90%,transparent)}
   .track:active{cursor:grabbing}
-  .track.loading::after{content:"";position:absolute;left:0;right:0;top:14px;height:14px;
-    background:linear-gradient(90deg,transparent,rgba(255,255,255,.85),transparent);
-    transform:translateX(-100%);animation:shimmer 1.4s ease infinite}
-  @keyframes shimmer{to{transform:translateX(100%)}}
   .strip{position:absolute;top:0;bottom:0;left:0;will-change:transform}
   .striprail{position:absolute;left:0;right:0;top:14px;height:14px;background:var(--hair2)}
   .striprail .fut{position:absolute;top:0;bottom:0;
@@ -108,11 +119,19 @@
     padding:9px 14px;font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none;text-align:center}
   .toast.show{opacity:1}
 
-  @media (prefers-reduced-motion:reduce){.live .dot::after{animation:none}.rail.loading::after{animation:none}}
+  @media (prefers-reduced-motion:reduce){.live .dot::after{animation:none}}
 </style>
 </head>
 <body>
 <div id="map"></div>
+
+<div class="splash" id="splash">
+  <h1>Regenradar</h1>
+  <div class="sub">GeoSphere Austria · INCA</div>
+  <div class="pct" id="pct">0%</div>
+  <div class="bar"><i id="barFill"></i></div>
+  <div class="stat" id="stat">Verbinde …</div>
+</div>
 
 <div class="hdr">
   <div class="brand"><h1>Regenradar</h1></div>
@@ -138,7 +157,7 @@
   </div>
   <div class="nc" id="ncTxt"><div class="ncdot"></div><span id="ncMsg"></span></div>
   <div class="tl">
-    <div class="track loading" id="track" role="slider" aria-label="Zeitleiste" tabindex="0">
+    <div class="track" id="track" role="slider" aria-label="Zeitleiste" tabindex="0">
       <div class="strip" id="strip">
         <div class="striprail" id="rail"><div class="fut" id="futShade"></div></div>
       </div>
@@ -151,19 +170,23 @@
 
 <script>
 /* ============================================================
-   Regenradar AT — Swiss Utility · v2
-   Daten: GeoSphere Austria INCA (CC-BY 4.0) · Fallback RainViewer
-   Neu: bis zu +6 h Nowcast, letzte 90 min Rückblick (wenn
-   verfügbar), Stunden-Lineal, JETZT-Sprung, adaptives Tempo
+   Regenradar AT — Swiss Utility · v3 "Ganz Österreich"
+   Architektur:
+   1) Preload: INCA-Daten für GANZ Österreich in 6 Längsstreifen
+      parallel laden → kompaktes Master-Raster im Speicher (~6 MB)
+   2) Preloader mit echtem Fortschritt, App erst sichtbar wenn fertig
+   3) Anzeige: sichtbarer Ausschnitt wird LOKAL aus dem Master
+      gerendert — Pan/Zoom durch ganz AT ohne weitere Netz-Anfragen
+   Daten: GeoSphere Austria (CC-BY 4.0) · Fallback RainViewer
    ============================================================ */
 const GS_API='https://dataset.api.hub.geosphere.at/v1';
-const AT_BOUNDS={s:46.0,w:9.2,n:49.4,e:17.6};
-const MAX_SPAN={lat:1.2,lon:2.0};
+const AT={s:46.0,w:9.2,n:49.4,e:17.6};
+const STRIPES=6;
 const MAX_FUTURE=21;          /* 21 × 15 min ≈ +5 h */
-const PAST_MIN=90;            /* Rückblick-Fenster in Minuten */
+const PAST_MIN=60;
 const END_HOLD=1300, LAYER_ALPHA=0.78;
 const REDUCED=matchMedia('(prefers-reduced-motion: reduce)').matches;
-const PPF=56;                 /* Pixel pro 15-min-Frame am Band */
+const PPF=56;
 addEventListener('resize',()=>frames.length&&applyPos());
 
 const map=L.map('map',{zoomControl:false,fadeAnimation:false}).setView([48.175,16.38],10);
@@ -182,17 +205,25 @@ function relFmt(min){
 }
 function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');
   clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('show'),3200)}
+const raf=()=>new Promise(r=>requestAnimationFrame(r));
 
-let frames=[],pos=0,playing=true,holdUntil=0,lastT=0;
-let source=null,fetchedBbox=null;
-const frameMs=()=>frames.length>14?620:850;   /* mehr Frames → flotteres Tempo */
-const nowIdx=()=>{let k=0;frames.forEach((f,j)=>{if(!f.future)k=j});return k};
+/* ---------- Preloader ---------- */
+let progDone=0,progTotal=1;
+function progInit(total,label){progDone=0;progTotal=total;progSet(0,label)}
+function progTick(label){progDone++;progSet(progDone/progTotal,label)}
+function progSet(f,label){
+  const p=Math.min(100,Math.round(f*100));
+  $('pct').textContent=p+'%';
+  $('barFill').style.width=p+'%';
+  if(label)$('stat').textContent=label;
+}
+function splashDone(){const s=$('splash');s.classList.add('done');
+  setTimeout(()=>s.style.display='none',500)}
 
-/* Intensitätsklassen (mm pro 15 min) → Isoflächen statt Verlauf.
-   Klasse 1 = Niesel-Schleier (flächig, dezent), ab Klasse 2 sattes Blau bis Signalrot */
+/* ---------- Intensitätsklassen ---------- */
 const LEVELS=[0.05,0.2,0.5,1.0,2.5,5.0,10.0];
 const CLASS_RGBA=[null,
-  [147,167,201,85],    /* Niesel: "Wolken"-Schleier */
+  [147,167,201,85],
   [62,143,243,200],
   [35,98,210,210],
   [63,72,204,215],
@@ -201,7 +232,167 @@ const CLASS_RGBA=[null,
   [122,18,18,235]];
 function levelFor(v){let l=0;for(let i=0;i<LEVELS.length;i++)if(v>=LEVELS[i])l=i+1;return l}
 
-/* ---------- Crossfade-Engine (fasst nur die 2 sichtbaren Layer an) ---------- */
+/* ---------- Master-Raster: ganz Österreich, 1 px ≈ 1 km ---------- */
+const M={gW:0,gH:0,timeMap:new Map(),times:[],grids:[]};
+(function(){
+  const midCos=Math.cos((AT.s+AT.n)/2*Math.PI/180);
+  M.gW=Math.round((AT.e-AT.w)*111.32*midCos);
+  M.gH=Math.round((AT.n-AT.s)*111.32);
+})();
+function gridOf(timeMs){
+  let g=M.timeMap.get(timeMs);
+  if(!g){g=new Uint8Array(M.gW*M.gH);M.timeMap.set(timeMs,g)}
+  return g;
+}
+function writeStripe(gj,limit){
+  const times=(gj.timestamps||[]).slice(0,limit||Infinity).map(Date.parse);
+  const grids=times.map(gridOf);
+  for(const ft of gj.features||[]){
+    const c=ft.geometry.coordinates;
+    const x=Math.round((c[0]-AT.w)/(AT.e-AT.w)*(M.gW-1));
+    const y=Math.round((AT.n-c[1])/(AT.n-AT.s)*(M.gH-1));
+    if(x<0||y<0||x>=M.gW||y>=M.gH)continue;
+    const arr=ft.properties?.parameters?.rr?.data;if(!arr)continue;
+    const idx=y*M.gW+x;
+    for(let t=0;t<times.length;t++){
+      const v=arr[t];if(v==null)continue;
+      const l=levelFor(v);
+      if(l>grids[t][idx])grids[t][idx]=l;
+    }
+  }
+}
+async function fetchGrid(url){
+  const res=await fetch(url);
+  if(!res.ok)throw new Error('HTTP '+res.status);
+  return res.json();
+}
+async function pool(tasks,limit){
+  const results=[];let i=0;
+  async function worker(){
+    while(i<tasks.length){const j=i++;results[j]=await tasks[j]().catch(e=>({__err:e}))}
+  }
+  await Promise.all(Array.from({length:Math.min(limit,tasks.length)},worker));
+  return results;
+}
+
+/* ---------- Preload: ganz Österreich in Streifen ---------- */
+async function preloadAustria(showSplash){
+  const stripes=[];
+  for(let i=0;i<STRIPES;i++){
+    const w=AT.w+(AT.e-AT.w)*i/STRIPES, e=AT.w+(AT.e-AT.w)*(i+1)/STRIPES;
+    stripes.push(`${AT.s},${w.toFixed(3)},${AT.n},${e.toFixed(3)}`);
+  }
+  const end=new Date(),start=new Date(Date.now()-PAST_MIN*60000);
+  const tasks=[];
+  for(const bb of stripes)tasks.push(async()=>{
+    const gj=await fetchGrid(`${GS_API}/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox=${bb}&output_format=geojson`);
+    writeStripe(gj,MAX_FUTURE);
+    if(showSplash)progTick('Lade Prognose …');
+    return true;
+  });
+  for(const bb of stripes)tasks.push(async()=>{
+    const gj=await fetchGrid(`${GS_API}/grid/historical/inca-v1-15min-1km?parameters=rr&bbox=${bb}`+
+      `&start=${start.toISOString().slice(0,16)}&end=${end.toISOString().slice(0,16)}&output_format=geojson`);
+    writeStripe(gj);
+    if(showSplash)progTick('Lade Rückblick …');
+    return true;
+  });
+  if(showSplash)progInit(tasks.length+MAX_FUTURE,'Verbinde mit GeoSphere …');
+  const res=await pool(tasks,3);
+  /* Prognose ist Pflicht: mindestens 1 Streifen muss da sein */
+  const ncOk=res.slice(0,STRIPES).some(r=>r===true);
+  if(!ncOk)throw(res[0]&&res[0].__err)||new Error('Prognose nicht ladbar');
+  M.times=[...M.timeMap.keys()].sort((a,b)=>a-b);
+  M.grids=M.times.map(t=>M.timeMap.get(t));
+}
+
+/* ---------- Viewport lokal aus dem Master rendern ---------- */
+function renderSlice(grid,gx0,gy0,gw,gh,S){
+  const n=gw*gh;
+  const a=new Float32Array(n), b=new Float32Array(n);
+  for(let y=0;y<gh;y++)for(let x=0;x<gw;x++)
+    a[y*gw+x]=grid[(gy0+y)*M.gW+(gx0+x)];
+  for(let y=0;y<gh;y++)for(let x=0;x<gw;x++){
+    const i=y*gw+x;
+    if(a[i]>0){b[i]=a[i];continue}
+    let m=0;
+    if(x>0&&a[i-1]>m)m=a[i-1];
+    if(x<gw-1&&a[i+1]>m)m=a[i+1];
+    if(y>0&&a[i-gw]>m)m=a[i-gw];
+    if(y<gh-1&&a[i+gw]>m)m=a[i+gw];
+    b[i]=m*0.6;
+  }
+  for(let i=0;i<n;i++)a[i]=(b[Math.max(0,i-1)]+2*b[i]+b[Math.min(n-1,i+1)])*0.25;
+  for(let i=0;i<n;i++)b[i]=(a[Math.max(0,i-gw)]+2*a[i]+a[Math.min(n-1,i+gw)])*0.25;
+  const small=document.createElement('canvas');small.width=gw;small.height=gh;
+  const sctx=small.getContext('2d');
+  const im=sctx.createImageData(gw,gh);
+  for(let i=0;i<n;i++){im.data[i*4]=Math.min(255,b[i]*32);im.data[i*4+3]=255}
+  sctx.putImageData(im,0,0);
+  const W=gw*S,H=gh*S;
+  const out=document.createElement('canvas');out.width=W;out.height=H;
+  const octx=out.getContext('2d');
+  octx.imageSmoothingEnabled=true;octx.imageSmoothingQuality='high';
+  octx.drawImage(small,0,0,W,H);
+  const img=octx.getImageData(0,0,W,H),d=img.data;
+  for(let k=0;k<d.length;k+=4){
+    const l=Math.round(d[k]/32);
+    if(l<1){d[k+3]=0;continue}
+    const c=CLASS_RGBA[Math.min(l,7)];
+    d[k]=c[0];d[k+1]=c[1];d[k+2]=c[2];d[k+3]=c[3];
+  }
+  octx.putImageData(img,0,0);
+  const url=out.toDataURL();
+  small.width=small.height=0;out.width=out.height=0;
+  return url;
+}
+
+let frames=[],pos=0,playing=true,holdUntil=0,lastT=0;
+let source=null,renderedRect=null,renderToken=0;
+const frameMs=()=>frames.length>14?620:850;
+const nowIdx=()=>{let k=0;frames.forEach((f,j)=>{if(!f.future)k=j});return k};
+
+async function renderView(showProgress){
+  if(source!=='inca'||!M.grids.length)return;
+  const token=++renderToken;
+  const b=map.getBounds(),pad=0.3;
+  let s=Math.max(AT.s,b.getSouth()-(b.getNorth()-b.getSouth())*pad);
+  let n=Math.min(AT.n,b.getNorth()+(b.getNorth()-b.getSouth())*pad);
+  let w=Math.max(AT.w,b.getWest()-(b.getEast()-b.getWest())*pad);
+  let e=Math.min(AT.e,b.getEast()+(b.getEast()-b.getWest())*pad);
+  let gx0=Math.max(0,Math.floor((w-AT.w)/(AT.e-AT.w)*M.gW));
+  let gy0=Math.max(0,Math.floor((AT.n-n)/(AT.n-AT.s)*M.gH));
+  let gx1=Math.min(M.gW,Math.ceil((e-AT.w)/(AT.e-AT.w)*M.gW));
+  let gy1=Math.min(M.gH,Math.ceil((AT.n-s)/(AT.n-AT.s)*M.gH));
+  const gw=Math.max(8,gx1-gx0),gh=Math.max(8,gy1-gy0);
+  const S=Math.min(12,Math.max(2,Math.floor(700/Math.max(gw,gh))));
+  /* exakte Geo-Grenzen des Ausschnitts zurückrechnen */
+  const bw=AT.w+gx0/M.gW*(AT.e-AT.w), be=AT.w+(gx0+gw)/M.gW*(AT.e-AT.w);
+  const bn=AT.n-gy0/M.gH*(AT.n-AT.s), bs=AT.n-(gy0+gh)/M.gH*(AT.n-AT.s);
+  const bounds=[[bs,bw],[bn,be]];
+
+  const ni=nowIdx(),order=[ni];
+  for(let d=1;d<frames.length;d++){
+    if(ni+d<frames.length)order.push(ni+d);
+    if(ni-d>=0)order.push(ni-d);
+  }
+  const fresh=new Array(frames.length).fill(null);
+  for(const j of order){
+    if(token!==renderToken)return;          /* neuer Render gestartet → abbrechen */
+    const url=renderSlice(M.grids[j],gx0,gy0,gw,gh,S);
+    const ov=L.imageOverlay(url,bounds,{opacity:0,zIndex:200,interactive:false}).addTo(map);
+    const old=frames[j].overlay;
+    frames[j].overlay=ov;fresh[j]=ov;
+    if(old)map.removeLayer(old);
+    if(j===ni)applyPos();
+    if(showProgress)progTick('Rendere Radar …');
+    await raf();
+  }
+  renderedRect={gx0,gy0,gx1,gy1};
+  applyPos();
+}
+
+/* ---------- Crossfade-Engine (nur 2 sichtbare Layer) ---------- */
 let visA=-1,visB=-1;
 function applyPos(){
   const n=frames.length;if(!n)return;
@@ -252,175 +443,11 @@ function setPlaying(p){playing=p;
 $('play').addEventListener('click',()=>setPlaying(!playing));
 $('jumpNow').addEventListener('click',()=>{pos=nowIdx();applyPos()});
 
-/* ---------- Geometrie / Rendering ---------- */
-function currentBbox(){
-  const b=map.getBounds(),c=map.getCenter();
-  let s=Math.max(b.getSouth(),AT_BOUNDS.s),n=Math.min(b.getNorth(),AT_BOUNDS.n),
-      w=Math.max(b.getWest(),AT_BOUNDS.w),e=Math.min(b.getEast(),AT_BOUNDS.e);
-  if(n-s>MAX_SPAN.lat){s=c.lat-MAX_SPAN.lat/2;n=c.lat+MAX_SPAN.lat/2}
-  if(e-w>MAX_SPAN.lon){w=c.lng-MAX_SPAN.lon/2;e=c.lng+MAX_SPAN.lon/2}
-  const pl=(n-s)*0.25,po=(e-w)*0.25;
-  return{s:Math.max(s-pl,AT_BOUNDS.s),n:Math.min(n+pl,AT_BOUNDS.n),
-         w:Math.max(w-po,AT_BOUNDS.w),e:Math.min(e+po,AT_BOUNDS.e)};
-}
 function clearFrames(){frames.forEach(f=>f.overlay&&map.removeLayer(f.overlay));frames=[];visA=visB=-1}
 
-/* ---------- Daten → kompakte Level-Raster ----------
-   Statt 35 Riesen-Canvases (iOS-Speicherlimit!) halten wir pro Frame nur
-   ein Uint8-Raster (~Kilobytes) und rendern daraus kleine PNGs.
-   Glättung passiert in JS (Safari unterstützt ctx.filter-Blur nicht
-   zuverlässig – DAS war die Pixel-Ursache). */
-function gridGeometry(bb){
-  const midCos=Math.cos((bb.s+bb.n)/2*Math.PI/180);
-  const gW=Math.max(8,Math.round((bb.e-bb.w)*111.32*midCos));  /* 1 px ≈ 1 km */
-  const gH=Math.max(8,Math.round((bb.n-bb.s)*111.32));
-  const S=Math.min(12,Math.max(2,Math.floor(640/Math.max(gW,gH))));
-  return{gW,gH,S};
-}
-
-function buildLevelGrids(gj,bb,gW,gH){
-  const feats=gj.features||[], times=(gj.timestamps||[]).map(Date.parse);
-  const grids=times.map(()=>new Uint8Array(gW*gH));
-  for(const ft of feats){
-    const c=ft.geometry.coordinates;
-    const x=Math.round((c[0]-bb.w)/(bb.e-bb.w)*(gW-1));
-    const y=Math.round((bb.n-c[1])/(bb.n-bb.s)*(gH-1));
-    if(x<0||y<0||x>=gW||y>=gH)continue;
-    const arr=ft.properties?.parameters?.rr?.data;if(!arr)continue;
-    const idx=y*gW+x;
-    for(let t=0;t<times.length;t++){
-      const v=arr[t];if(v==null)continue;
-      const l=levelFor(v);
-      if(l>grids[t][idx])grids[t][idx]=l;
-    }
-  }
-  return{times,grids};
-}
-
-/* Ein Frame: Lücken füllen, in JS glätten, bilinear hochskalieren,
-   quantisieren — Canvas-Speicher danach sofort freigeben */
-function renderLevelGrid(grid,bb,gW,gH,S){
-  const n=gW*gH;
-  const a=new Float32Array(n), b=new Float32Array(n);
-  for(let i=0;i<n;i++)a[i]=grid[i];
-  /* Projektionslücken mit Nachbar-Maximum auffüllen */
-  for(let y=0;y<gH;y++)for(let x=0;x<gW;x++){
-    const i=y*gW+x;
-    if(a[i]>0){b[i]=a[i];continue}
-    let m=0;
-    if(x>0&&a[i-1]>m)m=a[i-1];
-    if(x<gW-1&&a[i+1]>m)m=a[i+1];
-    if(y>0&&a[i-gW]>m)m=a[i-gW];
-    if(y<gH-1&&a[i+gW]>m)m=a[i+gW];
-    b[i]=m*0.6;
-  }
-  /* separabler [1,2,1]-Blur in JS → runde Konturen, Safari-sicher */
-  for(let i=0;i<n;i++)a[i]=(b[Math.max(0,i-1)]+2*b[i]+b[Math.min(n-1,i+1)])*0.25;
-  for(let i=0;i<n;i++)b[i]=(a[Math.max(0,i-gW)]+2*a[i]+a[Math.min(n-1,i+gW)])*0.25;
-  const small=document.createElement('canvas');small.width=gW;small.height=gH;
-  const sctx=small.getContext('2d');
-  const im=sctx.createImageData(gW,gH);
-  for(let i=0;i<n;i++){im.data[i*4]=Math.min(255,b[i]*32);im.data[i*4+3]=255}
-  sctx.putImageData(im,0,0);
-  const W=gW*S,H=gH*S;
-  const out=document.createElement('canvas');out.width=W;out.height=H;
-  const octx=out.getContext('2d');
-  octx.imageSmoothingEnabled=true;octx.imageSmoothingQuality='high';
-  octx.drawImage(small,0,0,W,H);
-  const img=octx.getImageData(0,0,W,H),d=img.data;
-  for(let k=0;k<d.length;k+=4){
-    const l=Math.round(d[k]/32);
-    if(l<1){d[k+3]=0;continue}
-    const c=CLASS_RGBA[Math.min(l,7)];
-    d[k]=c[0];d[k+1]=c[1];d[k+2]=c[2];d[k+3]=c[3];
-  }
-  octx.putImageData(img,0,0);
-  const url=out.toDataURL();
-  small.width=small.height=0;out.width=out.height=0;  /* iOS: Speicher sofort frei */
-  return url;
-}
-const raf=()=>new Promise(r=>requestAnimationFrame(r));
-
-async function fetchGrid(url){
-  const res=await fetch(url);
-  if(!res.ok)throw new Error('HTTP '+res.status);
-  const gj=await res.json();
-  if(!(gj.timestamps||[]).length||!(gj.features||[]).length)throw new Error('leer');
-  return gj;
-}
-
-/* ---------- INCA: Rückblick + Prognose, parallel geladen, progressiv gerendert ---------- */
-async function loadINCA(){
-  const bb=currentBbox();
-  const bboxStr=`${bb.s.toFixed(3)},${bb.w.toFixed(3)},${bb.n.toFixed(3)},${bb.e.toFixed(3)}`;
-  $('track').classList.add('loading');
-
-  /* beide Anfragen gleichzeitig; Rückblick darf leise scheitern */
-  const end=new Date(),start=new Date(Date.now()-PAST_MIN*60000);
-  const [ncRes,histRes]=await Promise.allSettled([
-    fetchGrid(`${GS_API}/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox=${bboxStr}&output_format=geojson`),
-    fetchGrid(`${GS_API}/grid/historical/inca-v1-15min-1km?parameters=rr&bbox=${bboxStr}`+
-      `&start=${start.toISOString().slice(0,16)}&end=${end.toISOString().slice(0,16)}&output_format=geojson`)
-  ]);
-  if(ncRes.status!=='fulfilled')throw ncRes.reason;
-
-  const{gW,gH,S}=gridGeometry(bb);
-  const ncL=buildLevelGrids(ncRes.value,bb,gW,gH);
-  const ncTimes=ncL.times.slice(0,MAX_FUTURE), ncGrids=ncL.grids.slice(0,MAX_FUTURE);
-  const entries=[];
-  if(histRes.status==='fulfilled'){
-    const hL=buildLevelGrids(histRes.value,bb,gW,gH);
-    for(let t=0;t<hL.times.length;t++){
-      if(ncTimes.length&&hL.times[t]>=ncTimes[0])continue;   /* Überlapp dedupen */
-      entries.push({time:hL.times[t],grid:hL.grids[t]});
-    }
-  }
-  for(let t=0;t<ncTimes.length;t++)entries.push({time:ncTimes[t],grid:ncGrids[t]});
-  if(!entries.length)throw new Error('leere Antwort');
-
-  const wasPlaying=playing;setPlaying(false);
-  clearFrames();
-  const NOW=Date.now()+60000;
-  frames=entries.map(e=>({time:e.time,future:e.time>NOW,overlay:null}));
-  fetchedBbox=bb;source='inca';
-  $('srcTxt').textContent='LIVE · INCA';$('liveBadge').classList.remove('off');
-  buildTimeline();pos=nowIdx();
-
-  /* progressiv: zuerst das Jetzt-Bild, dann von dort nach außen */
-  const ni=nowIdx(),order=[ni];
-  for(let d=1;d<frames.length;d++){
-    if(ni+d<frames.length)order.push(ni+d);
-    if(ni-d>=0)order.push(ni-d);
-  }
-  for(const j of order){
-    const url=renderLevelGrid(entries[j].grid,bb,gW,gH,S);
-    frames[j].overlay=L.imageOverlay(url,[[bb.s,bb.w],[bb.n,bb.e]],
-      {opacity:0,zIndex:200,interactive:false}).addTo(map);
-    if(j===ni)applyPos();             /* erstes Bild sofort zeigen */
-    await raf();
-  }
-  applyPos();setPlaying(wasPlaying);
-}
-
-/* ---------- Fallback: RainViewer ---------- */
-async function loadRainViewer(){
-  const res=await fetch('https://api.rainviewer.com/public/weather-maps.json');
-  const data=await res.json();
-  const mk=(f,fut)=>({time:f.time*1000,future:fut,
-    overlay:L.tileLayer(data.host+f.path+'/256/{z}/{x}/{y}/4/1_1.png',{opacity:0,zIndex:200}).addTo(map)});
-  clearFrames();
-  frames=[...(data.radar.past||[]).map(f=>mk(f,false)),
-          ...(data.radar.nowcast||[]).map(f=>mk(f,true))];
-  if(!frames.length)throw new Error('keine Frames');
-  source='rainviewer';
-  $('srcTxt').textContent='RAINVIEWER';$('liveBadge').classList.add('off');
-  buildTimeline();pos=nowIdx();applyPos();
-}
-
-/* ---------- Timeline-Band aufbauen ---------- */
+/* ---------- Timeline-Band ---------- */
 function buildTimeline(){
-  const track=$('track'),strip=$('strip'),rail=$('rail');
-  track.classList.remove('loading');
+  const strip=$('strip'),rail=$('rail');
   rail.querySelectorAll('.seg').forEach(s=>s.remove());
   strip.querySelectorAll('.hlabel,.nowmk').forEach(s=>s.remove());
   const n=frames.length;
@@ -450,7 +477,7 @@ function buildTimeline(){
   }
 }
 
-/* ---------- Band ziehen (Tape-Scrubbing) ---------- */
+/* ---------- Band ziehen ---------- */
 const track=$('track');
 track.addEventListener('pointerdown',e=>{
   setPlaying(false);
@@ -469,7 +496,22 @@ track.addEventListener('keydown',e=>{
   if(e.key===' '){e.preventDefault();setPlaying(!playing)}
 });
 
-/* ---------- Punkt-Nowcast ---------- */
+/* ---------- Fallback: RainViewer ---------- */
+async function loadRainViewer(){
+  const res=await fetch('https://api.rainviewer.com/public/weather-maps.json');
+  const data=await res.json();
+  const mk=(f,fut)=>({time:f.time*1000,future:fut,
+    overlay:L.tileLayer(data.host+f.path+'/256/{z}/{x}/{y}/4/1_1.png',{opacity:0,zIndex:200}).addTo(map)});
+  clearFrames();
+  frames=[...(data.radar.past||[]).map(f=>mk(f,false)),
+          ...(data.radar.nowcast||[]).map(f=>mk(f,true))];
+  if(!frames.length)throw new Error('keine Frames');
+  source='rainviewer';
+  $('srcTxt').textContent='RAINVIEWER';$('liveBadge').classList.add('off');
+  buildTimeline();pos=nowIdx();applyPos();
+}
+
+/* ---------- Punkt-Prognose am Standort ---------- */
 async function pointNowcast(lat,lon){
   try{
     const url=`${GS_API}/timeseries/forecast/nowcast-v1-15min-1km?parameters=rr&lat_lon=${lat.toFixed(4)},${lon.toFixed(4)}`;
@@ -491,7 +533,6 @@ async function pointNowcast(lat,lon){
     box.classList.add('show');
   }catch(e){}
 }
-
 async function getPosition(){
   const Geo=window.Capacitor?.Plugins?.Geolocation;
   if(Geo){
@@ -513,28 +554,59 @@ $('locate').addEventListener('click',async()=>{
   }catch(e){toast('Standort nicht freigegeben')}
 });
 
-/* ---------- Refetch beim Rauspannen ---------- */
-let moveT=null;
+/* ---------- Neu rendern beim Pan/Zoom (rein lokal, kein Netz) ---------- */
+let moveT=null,lastZoom=map.getZoom();
 map.on('moveend',()=>{
-  if(source!=='inca'||!fetchedBbox)return;
-  const c=map.getCenter();
-  const out=c.lat<fetchedBbox.s||c.lat>fetchedBbox.n||c.lng<fetchedBbox.w||c.lng>fetchedBbox.e;
-  if(!out)return;
+  if(source!=='inca'||!renderedRect)return;
+  const z=map.getZoom();
+  const b=map.getBounds();
+  const gx0=Math.floor((b.getWest()-AT.w)/(AT.e-AT.w)*M.gW);
+  const gx1=Math.ceil((b.getEast()-AT.w)/(AT.e-AT.w)*M.gW);
+  const gy0=Math.floor((AT.n-b.getNorth())/(AT.n-AT.s)*M.gH);
+  const gy1=Math.ceil((AT.n-b.getSouth())/(AT.n-AT.s)*M.gH);
+  const out=gx0<renderedRect.gx0||gx1>renderedRect.gx1||gy0<renderedRect.gy0||gy1>renderedRect.gy1;
+  const zoomed=Math.abs(z-lastZoom)>=1;
+  if(!out&&!zoomed)return;
+  lastZoom=z;
   clearTimeout(moveT);
-  moveT=setTimeout(()=>loadINCA().catch(()=>{}),700);
+  moveT=setTimeout(()=>renderView(false),450);
 });
 
 /* ---------- Boot ---------- */
 (async()=>{
-  try{await loadINCA()}
-  catch(e){
+  try{
+    await preloadAustria(true);
+    /* Frames aus dem Master aufbauen */
+    const NOW=Date.now()+60000;
+    frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
+    source='inca';
+    $('srcTxt').textContent='LIVE · INCA';$('liveBadge').classList.remove('off');
+    buildTimeline();pos=nowIdx();
+    await renderView(true);
+    progSet(1,'Fertig');
+    splashDone();
+  }catch(e){
     console.warn('INCA fehlgeschlagen:',e);
-    toast('GeoSphere nicht erreichbar – RainViewer-Fallback aktiv');
-    try{await loadRainViewer()}catch(e2){
-      $('track').classList.remove('loading');
-      $('rel').textContent='Keine Radardaten verfügbar';setPlaying(false)}
+    progSet(1,'Fallback …');
+    try{await loadRainViewer();toast('GeoSphere nicht erreichbar – RainViewer-Fallback aktiv')}
+    catch(e2){$('rel').textContent='Keine Radardaten verfügbar';setPlaying(false)}
+    splashDone();
   }
-  setInterval(()=>{(source==='inca'?loadINCA():loadRainViewer()).catch(()=>{})},600000);
+  /* alle 10 min im Hintergrund frische Daten (ohne Splash) */
+  setInterval(async()=>{
+    if(source!=='inca'){loadRainViewer().catch(()=>{});return}
+    try{
+      M.timeMap.clear();
+      await preloadAustria(false);
+      const NOW=Date.now()+60000;
+      const keep=pos-nowIdx();
+      clearFrames();
+      frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
+      buildTimeline();pos=Math.max(0,Math.min(frames.length-1,nowIdx()+keep));
+      renderedRect=null;
+      await renderView(false);
+    }catch(e){}
+  },600000);
 })();
 </script>
 </body>
