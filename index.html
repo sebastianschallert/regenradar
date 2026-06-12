@@ -121,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v4</div>
+  <div class="sub">GeoSphere Austria · INCA · v4.1</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -293,15 +293,15 @@ async function preloadAustria(showSplash){
   const res=await pool(tasks,3);
   const ncOk=res.slice(0,STRIPES).some(r=>r===true);
   if(!ncOk)throw(res[0]&&res[0].__err)||new Error('Prognose nicht ladbar');
-  M.times=[...M.timeMap.keys()].sort((a,b)=>a-b);
-  M.grids=M.times.map(t=>M.timeMap.get(t));
+  const times=[...M.timeMap.keys()].sort((a,b)=>a-b);
+  return{times,grids:times.map(t=>M.timeMap.get(t))};
 }
 
 /* ---------- Zugvektoren: grob 8 km → fein 2 km ---------- */
-function computeMotion(){
+function computeMotion(GR){
   const mkSmall=D=>{
     const sw=Math.floor(M.gW/D), sh=Math.floor(M.gH/D);
-    return{sw,sh,fr:M.grids.map(g=>{
+    return{sw,sh,fr:GR.map(g=>{
       const sm=new Float32Array(sw*sh);
       for(let y=0;y<sh;y++)for(let x=0;x<sw;x++){
         let sum=0;
@@ -324,8 +324,8 @@ function computeMotion(){
     return cnt<30?1e18:s/cnt;
   };
   const C=mkSmall(8), F=mkSmall(2);
-  M.motion=[];
-  for(let j=0;j<M.grids.length-1;j++){
+  const motion=[];
+  for(let j=0;j<GR.length-1;j++){
     let best=1e18,bx=0,by=0;
     for(let oy=-4;oy<=4;oy++)for(let ox=-4;ox<=4;ox++){
       const sc=sad(C.fr[j],C.fr[j+1],C.sw,C.sh,ox,oy,1);
@@ -336,8 +336,9 @@ function computeMotion(){
       const sc=sad(F.fr[j],F.fr[j+1],F.sw,F.sh,ox,oy,2);
       if(sc<fb){fb=sc;fx=ox;fy=oy}
     }
-    M.motion.push({kx:fx*2,ky:fy*2});
+    motion.push({kx:fx*2,ky:fy*2});
   }
+  return motion;
 }
 
 /* ---------- Canvas-Layer (eine einzige Render-Fläche) ---------- */
@@ -503,6 +504,33 @@ function applyPos(){
 }
 addEventListener('resize',()=>frames.length&&applyPos());
 
+let pendingRefresh=null;
+function posForTime(t){
+  if(!frames.length)return 0;
+  if(t<=frames[0].time)return 0;
+  for(let j=0;j<frames.length-1;j++)
+    if(t<frames[j+1].time)
+      return j+(t-frames[j].time)/(frames[j+1].time-frames[j].time);
+  return frames.length-1;
+}
+/* Frische Daten werden NICHT mitten in der Animation getauscht, sondern
+   am Schleifenende (natürlicher Schnitt). Die Position wird über die
+   UHRZEIT statt den Frame-Index erhalten → kein Springen mehr. */
+function commitRefresh(){
+  if(!pendingRefresh)return;
+  const i=Math.floor(pos),f=pos-i;
+  const tDisp=frames.length
+    ?frames[i].time+(frames[Math.min(i+1,frames.length-1)].time-frames[i].time)*f
+    :Date.now();
+  M.times=pendingRefresh.times;M.grids=pendingRefresh.grids;M.motion=pendingRefresh.motion;
+  pendingRefresh=null;
+  const NOW=Date.now()+60000;
+  frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
+  buildTimeline();
+  pos=posForTime(tDisp);
+  renderedRect=null;
+  renderView(false);
+}
 function loop(t){
   requestAnimationFrame(loop);
   if(!playing||!frames.length){lastT=t;return}
@@ -511,11 +539,11 @@ function loop(t){
   if(REDUCED){
     loop._acc=(loop._acc||0)+dt;
     if(loop._acc>=frameMs()){loop._acc=0;pos=Math.floor(pos)+1;
-      if(pos>frames.length-1){pos=0;holdUntil=t+END_HOLD}}
+      if(pos>frames.length-1){commitRefresh();pos=0;holdUntil=t+END_HOLD}}
   }else{
     pos+=dt/frameMs();
     if(pos>=frames.length-1){pos=frames.length-1;applyPos();holdUntil=t+END_HOLD;
-      setTimeout(()=>{if(playing)pos=0},END_HOLD);return}
+      setTimeout(()=>{if(playing){commitRefresh();pos=0}},END_HOLD);return}
   }
   applyPos();
 }
@@ -663,8 +691,9 @@ map.on('moveend',()=>{
 /* ---------- Boot ---------- */
 (async()=>{
   try{
-    await preloadAustria(true);
-    computeMotion();
+    const d0=await preloadAustria(true);
+    M.times=d0.times;M.grids=d0.grids;
+    M.motion=computeMotion(M.grids);
     const NOW=Date.now()+60000;
     frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
     source='inca';
@@ -684,15 +713,9 @@ map.on('moveend',()=>{
     if(source!=='inca'){loadRainViewer().catch(()=>{});return}
     try{
       M.timeMap.clear();
-      await preloadAustria(false);
-      computeMotion();
-      const NOW=Date.now()+60000;
-      const keep=pos-nowIdx();
-      frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
-      buildTimeline();
-      pos=Math.max(0,Math.min(frames.length-1,nowIdx()+keep));
-      renderedRect=null;
-      await renderView(false);
+      const d=await preloadAustria(false);
+      pendingRefresh={times:d.times,grids:d.grids,motion:computeMotion(d.grids)};
+      if(!playing)commitRefresh();   /* pausiert → sofort übernehmen */
     }catch(e){}
   },600000);
 })();
