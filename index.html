@@ -97,7 +97,9 @@
     background:var(--card);border:1px solid var(--hair);border-radius:4px;padding:10px 9px;
     display:flex;flex-direction:column;align-items:center;gap:6px}
   .lbar{width:8px;height:110px;
-    background:linear-gradient(to top,#3E8FF3,#2362D2,#7C3AED,#E03131)}
+    background:linear-gradient(to top,
+      rgba(147,167,201,.85) 0 14%,#3E8FF3 14% 28%,#2362D2 28% 42%,
+      #3F48CC 42% 57%,#7C3AED 57% 71%,#E03131 71% 86%,#7A1212 86% 100%)}
   .legend span{font-size:8.5px;font-weight:500;color:var(--gray);letter-spacing:.08em;
     writing-mode:vertical-rl;transform:rotate(180deg)}
 
@@ -186,16 +188,18 @@ let source=null,fetchedBbox=null;
 const frameMs=()=>frames.length>14?620:850;   /* mehr Frames → flotteres Tempo */
 const nowIdx=()=>{let k=0;frames.forEach((f,j)=>{if(!f.future)k=j});return k};
 
-/* Farbskala: Blau → Tiefblau → Violett → Signalrot (mm/15min) */
-function colorFor(v){
-  if(v<0.05)return null;
-  if(v<0.2) return[62,143,243,165];
-  if(v<0.5) return[35,98,210,185];
-  if(v<1.0) return[63,72,204,200];
-  if(v<2.5) return[124,58,237,210];
-  if(v<5.0) return[224,49,49,220];
-  return[122,18,18,230];
-}
+/* Intensitätsklassen (mm pro 15 min) → Isoflächen statt Verlauf.
+   Klasse 1 = Niesel-Schleier (flächig, dezent), ab Klasse 2 sattes Blau bis Signalrot */
+const LEVELS=[0.05,0.2,0.5,1.0,2.5,5.0,10.0];
+const CLASS_RGBA=[null,
+  [147,167,201,85],    /* Niesel: "Wolken"-Schleier */
+  [62,143,243,200],
+  [35,98,210,210],
+  [63,72,204,215],
+  [124,58,237,222],
+  [224,49,49,230],
+  [122,18,18,235]];
+function levelFor(v){let l=0;for(let i=0;i<LEVELS.length;i++)if(v>=LEVELS[i])l=i+1;return l}
 
 /* ---------- Crossfade-Engine ---------- */
 function applyPos(){
@@ -215,8 +219,8 @@ function applyPos(){
   const fut=frames[Math.round(pos)].future;
   const rel=$('rel'),badge=$('badge');
   if(fut){
-    rel.textContent=diff<=0?'Nowcast':'Nowcast · in '+relFmt(diff);
-    badge.textContent='NOWCAST';badge.classList.add('fc');
+    rel.textContent=diff<=0?'Prognose':'Prognose · in '+relFmt(diff);
+    badge.textContent='PROGNOSE';badge.classList.add('fc');
   }else{
     rel.textContent=diff>=-2?'Jetzt':'Vor '+relFmt(diff);
     badge.textContent=source==='inca'?'INCA':'RADAR';badge.classList.remove('fc');
@@ -261,33 +265,51 @@ function currentBbox(){
 }
 function clearFrames(){frames.forEach(f=>f.overlay&&map.removeLayer(f.overlay));frames=[]}
 
-function renderFrame(feats,tIndex,bb){
-  const W=500,H=Math.round(W*(bb.n-bb.s)/((bb.e-bb.w)*Math.cos((bb.s+bb.n)/2*Math.PI/180)));
-  const px=lon=>Math.round((lon-bb.w)/(bb.e-bb.w)*(W-1));
-  const py=lat=>Math.round((bb.n-lat)/(bb.n-bb.s)*(H-1));
-  const raw=document.createElement('canvas');raw.width=W;raw.height=H;
-  const rctx=raw.getContext('2d');
-  const img=rctx.createImageData(W,H),d=img.data;
-  for(const ft of feats){
-    const v=ft.properties?.parameters?.rr?.data?.[tIndex];
-    if(v==null)continue;
-    const c=colorFor(v);if(!c)continue;
-    const x=px(ft.geometry.coordinates[0]),y=py(ft.geometry.coordinates[1]);
-    for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){
-      const xx=x+dx,yy=y+dy;
-      if(xx<0||yy<0||xx>=W||yy>=H)continue;
-      const i=(yy*W+xx)*4;
-      if(d[i+3]>=c[3])continue;
-      d[i]=c[0];d[i+1]=c[1];d[i+2]=c[2];d[i+3]=c[3];
-    }
+/* Renderer pro Datensatz — "Vektor-Look":
+   1) Intensitätslevel als Graustufen aufs Feld stempeln (Überlapp = Maximum)
+   2) weichzeichnen → organische, glatte Konturen
+   3) zurück in diskrete Klassen quantisieren → scharfe Isoflächen-Kanten */
+function makeRenderer(feats,bb){
+  const midCos=Math.cos((bb.s+bb.n)/2*Math.PI/180);
+  const kmW=(bb.e-bb.w)*111.32*midCos, kmH=(bb.n-bb.s)*111.32;
+  const ppk=Math.min(10,1400/kmW);                 /* Pixel pro km */
+  const W=Math.round(kmW*ppk), H=Math.round(kmH*ppk);
+  const xs=new Float32Array(feats.length), ys=new Float32Array(feats.length);
+  for(let i=0;i<feats.length;i++){
+    const c=feats[i].geometry.coordinates;
+    xs[i]=(c[0]-bb.w)/(bb.e-bb.w)*(W-1);
+    ys[i]=(bb.n-c[1])/(bb.n-bb.s)*(H-1);
   }
-  rctx.putImageData(img,0,0);
-  const soft=document.createElement('canvas');soft.width=W;soft.height=H;
-  const sctx=soft.getContext('2d');
-  sctx.filter='blur(2.5px) saturate(1.1)';
-  sctx.drawImage(raw,0,0);
-  return L.imageOverlay(soft.toDataURL(),[[bb.s,bb.w],[bb.n,bb.e]],
-    {opacity:0,zIndex:200,interactive:false}).addTo(map);
+  const cell=Math.max(2,Math.ceil(ppk));           /* Stempel ≈ 1 Rasterzelle */
+  const blurPx=Math.max(1.5,ppk*0.9).toFixed(1);
+  return function(tIndex){
+    const field=document.createElement('canvas');field.width=W;field.height=H;
+    const fctx=field.getContext('2d');
+    fctx.globalCompositeOperation='lighten';
+    for(let i=0;i<feats.length;i++){
+      const v=feats[i].properties?.parameters?.rr?.data?.[tIndex];
+      if(v==null)continue;
+      const l=levelFor(v);if(!l)continue;
+      const g=l*32;
+      fctx.fillStyle='rgb('+g+','+g+','+g+')';
+      fctx.fillRect(xs[i]-cell/2,ys[i]-cell/2,cell+1,cell+1);
+    }
+    const out=document.createElement('canvas');out.width=W;out.height=H;
+    const octx=out.getContext('2d');
+    octx.filter='blur('+blurPx+'px)';
+    octx.drawImage(field,0,0);
+    octx.filter='none';
+    const img=octx.getImageData(0,0,W,H),d=img.data;
+    for(let k=0;k<d.length;k+=4){
+      const l=Math.round(d[k]/32);
+      if(l<1){d[k+3]=0;continue}
+      const c=CLASS_RGBA[Math.min(l,7)];
+      d[k]=c[0];d[k+1]=c[1];d[k+2]=c[2];d[k+3]=c[3];
+    }
+    octx.putImageData(img,0,0);
+    return L.imageOverlay(out.toDataURL(),[[bb.s,bb.w],[bb.n,bb.e]],
+      {opacity:0,zIndex:200,interactive:false}).addTo(map);
+  };
 }
 
 async function fetchGrid(url){
@@ -317,16 +339,18 @@ async function loadINCA(){
 
   const nf=[];
   const ncTimes=(nc.timestamps||[]).slice(0,MAX_FUTURE).map(Date.parse);
+  const rNC=makeRenderer(nc.features,bb);
   if(hist){
+    const rHist=makeRenderer(hist.features,bb);
     const ht=(hist.timestamps||[]).map(Date.parse);
     for(let t=0;t<ht.length;t++){
       if(ncTimes.length&&ht[t]>=ncTimes[0])continue;   /* Überlapp dedupen */
-      nf.push({time:ht[t],future:false,overlay:renderFrame(hist.features,t,bb)});
+      nf.push({time:ht[t],future:false,overlay:rHist(t)});
     }
   }
   const NOW=Date.now()+60000;
   for(let t=0;t<ncTimes.length;t++){
-    nf.push({time:ncTimes[t],future:ncTimes[t]>NOW,overlay:renderFrame(nc.features,t,bb)});
+    nf.push({time:ncTimes[t],future:ncTimes[t]>NOW,overlay:rNC(t)});
   }
   clearFrames();frames=nf;
   fetchedBbox=bb;source='inca';
