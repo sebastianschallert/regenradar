@@ -121,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v4.1</div>
+  <div class="sub">GeoSphere Austria · INCA · v4.2</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -341,6 +341,19 @@ function computeMotion(GR){
   return motion;
 }
 
+/* Zugvektoren über Nachbar-Frames glätten und auf plausible
+   Geschwindigkeit begrenzen — verrauschte Einzelschätzungen ließen
+   das ganze Feld pro Segment unterschiedlich "lurchen" */
+function smoothMotion(mo){
+  return mo.map((m,j)=>{
+    const a=mo[Math.max(0,j-1)],b=mo[Math.min(mo.length-1,j+1)];
+    let kx=(a.kx+2*m.kx+b.kx)/4, ky=(a.ky+2*m.ky+b.ky)/4;
+    const mag=Math.hypot(kx,ky);
+    if(mag>30){kx*=30/mag;ky*=30/mag}   /* >120 km/h unplausibel */
+    return{kx,ky};
+  });
+}
+
 /* ---------- Canvas-Layer (eine einzige Render-Fläche) ---------- */
 const MorphLayer=L.Layer.extend({
   initialize(){this.canvas=document.createElement('canvas');
@@ -426,6 +439,7 @@ async function renderView(showProgress){
   }
   if(token!==renderToken)return;
   V.cnvs=cnvs;V.gw=gw;V.gh=gh;V.W=gw*S;V.H=gh*S;
+  V.geo={gx0,gy0,gw,gh,S};
   V.tmp.width=gw;V.tmp.height=gh;
   morphLayer.canvas.width=V.W;morphLayer.canvas.height=V.H;
   morphLayer.setBounds([[bs,bw],[bn,be]]);
@@ -435,15 +449,13 @@ async function renderView(showProgress){
 }
 
 /* ---------- DER Morph: Feld interpolieren, EINMAL quantisieren ---------- */
-let lastDraw=0,trailT=null;
+let drawCost=6,skipBeat=0;
 function drawMorph(p,force){
   if(!V.cnvs||!V.cnvs.length)return;
-  const now=performance.now();
-  if(!force&&now-lastDraw<30){
-    clearTimeout(trailT);trailT=setTimeout(()=>drawMorph(pos,true),35);
-    return;
-  }
-  lastDraw=now;
+  /* Gleichmäßigkeit schlägt Rate: bei teurem Frame stabil JEDEN
+     zweiten Takt zeichnen statt unregelmäßig zu drosseln */
+  if(!force&&drawCost>15){skipBeat^=1;if(skipBeat)return}
+  const t0=performance.now();
   const nn=V.cnvs.length;
   const i=Math.max(0,Math.min(nn-1,Math.floor(p))), f=Math.max(0,Math.min(1,p-i));
   const t=V.tmp.getContext('2d');
@@ -469,6 +481,7 @@ function drawMorph(p,force){
   const u8=img.data,u32=new Uint32Array(u8.buffer);
   for(let k=0,K=V.W*V.H;k<K;k++)u32[k]=LUT[u8[k*4]];
   o.putImageData(img,0,0);
+  drawCost=drawCost*0.8+(performance.now()-t0)*0.2;
 }
 
 /* ---------- Anzeige / Engine ---------- */
@@ -518,18 +531,26 @@ function posForTime(t){
    UHRZEIT statt den Frame-Index erhalten → kein Springen mehr. */
 function commitRefresh(){
   if(!pendingRefresh)return;
+  const pr=pendingRefresh;pendingRefresh=null;
   const i=Math.floor(pos),f=pos-i;
   const tDisp=frames.length
     ?frames[i].time+(frames[Math.min(i+1,frames.length-1)].time-frames[i].time)*f
     :Date.now();
-  M.times=pendingRefresh.times;M.grids=pendingRefresh.grids;M.motion=pendingRefresh.motion;
-  pendingRefresh=null;
+  M.times=pr.times;M.grids=pr.grids;M.motion=pr.motion;
   const NOW=Date.now()+60000;
   frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
   buildTimeline();
   pos=posForTime(tDisp);
-  renderedRect=null;
-  renderView(false);
+  const sameGeo=pr.cnvs&&pr.geo&&V.geo&&
+    pr.geo.gx0===V.geo.gx0&&pr.geo.gy0===V.geo.gy0&&
+    pr.geo.gw===V.geo.gw&&pr.geo.gh===V.geo.gh&&pr.geo.S===V.geo.S;
+  if(sameGeo){
+    V.cnvs=pr.cnvs;          /* reiner Zeiger-Tausch, kein Rendern nötig */
+    drawMorph(pos,true);
+  }else{
+    renderedRect=null;
+    renderView(false);
+  }
 }
 function loop(t){
   requestAnimationFrame(loop);
@@ -693,7 +714,7 @@ map.on('moveend',()=>{
   try{
     const d0=await preloadAustria(true);
     M.times=d0.times;M.grids=d0.grids;
-    M.motion=computeMotion(M.grids);
+    M.motion=smoothMotion(computeMotion(M.grids));
     const NOW=Date.now()+60000;
     frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
     source='inca';
@@ -714,7 +735,16 @@ map.on('moveend',()=>{
     try{
       M.timeMap.clear();
       const d=await preloadAustria(false);
-      pendingRefresh={times:d.times,grids:d.grids,motion:computeMotion(d.grids)};
+      const motion=smoothMotion(computeMotion(d.grids));
+      let cnvs=null;const geo=V.geo;
+      if(geo){
+        cnvs=[];
+        for(let j=0;j<d.times.length;j++){
+          cnvs[j]=makeFieldCanvas(d.grids[j],geo.gx0,geo.gy0,geo.gw,geo.gh);
+          if(j%4===3)await raf();
+        }
+      }
+      pendingRefresh={times:d.times,grids:d.grids,motion,cnvs,geo};
       if(!playing)commitRefresh();   /* pausiert → sofort übernehmen */
     }catch(e){}
   },600000);
