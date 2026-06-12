@@ -127,7 +127,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA</div>
+  <div class="sub">GeoSphere Austria · INCA · v3.1</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -311,35 +311,48 @@ async function preloadAustria(showSplash){
    bringt. Beim Abspielen wandern beide Bilder entlang dieses Vektors →
    der Regen "zieht", statt zu verschwinden und neu aufzutauchen. */
 function computeMotion(){
-  const D=8, sw=Math.floor(M.gW/D), sh=Math.floor(M.gH/D);
-  const small=M.grids.map(g=>{
-    const sm=new Float32Array(sw*sh);
-    for(let y=0;y<sh;y++)for(let x=0;x<sw;x++){
-      let sum=0;
-      for(let dy=0;dy<D;dy++)for(let dx=0;dx<D;dx++)
-        sum+=g[(y*D+dy)*M.gW+(x*D+dx)];
-      sm[y*sw+x]=sum;
+  const mkSmall=D=>{
+    const sw=Math.floor(M.gW/D), sh=Math.floor(M.gH/D);
+    return{sw,sh,fr:M.grids.map(g=>{
+      const sm=new Float32Array(sw*sh);
+      for(let y=0;y<sh;y++)for(let x=0;x<sw;x++){
+        let sum=0;
+        for(let dy=0;dy<D;dy++)for(let dx=0;dx<D;dx++)
+          sum+=g[(y*D+dy)*M.gW+(x*D+dx)];
+        sm[y*sw+x]=sum;
+      }
+      return sm;
+    })};
+  };
+  const sad=(A,B,sw,sh,ox,oy,stride)=>{
+    let s=0,cnt=0;
+    const y0=Math.max(0,-oy),y1=sh-Math.max(0,oy);
+    const x0=Math.max(0,-ox),x1=sw-Math.max(0,ox);
+    for(let y=y0;y<y1;y+=stride)for(let x=x0;x<x1;x+=stride){
+      const a=A[y*sw+x],b=B[(y+oy)*sw+(x+ox)];
+      if(a===0&&b===0)continue;
+      s+=Math.abs(a-b);cnt++;
     }
-    return sm;
-  });
+    return cnt<30?1e18:s/cnt;
+  };
+  const C=mkSmall(8), F=mkSmall(2);
   M.motion=[];
   for(let j=0;j<M.grids.length-1;j++){
-    const A=small[j],B=small[j+1];
+    /* Grobstufe: 8-km-Schritte, ±32 km */
     let best=1e18,bx=0,by=0;
-    for(let oy=-5;oy<=5;oy++)for(let ox=-5;ox<=5;ox++){
-      let sad=0,cnt=0;
-      const y0=Math.max(0,-oy),y1=sh-Math.max(0,oy);
-      const x0=Math.max(0,-ox),x1=sw-Math.max(0,ox);
-      for(let y=y0;y<y1;y++)for(let x=x0;x<x1;x++){
-        const a=A[y*sw+x],bv=B[(y+oy)*sw+(x+ox)];
-        if(a===0&&bv===0)continue;
-        sad+=Math.abs(a-bv);cnt++;
-      }
-      if(cnt<50)continue;
-      const score=sad/cnt;
-      if(score<best){best=score;bx=ox;by=oy}
+    for(let oy=-4;oy<=4;oy++)for(let ox=-4;ox<=4;ox++){
+      const sc=sad(C.fr[j],C.fr[j+1],C.sw,C.sh,ox,oy,1);
+      if(sc<best){best=sc;bx=ox;by=oy}
     }
-    M.motion.push({kx:bx*D,ky:by*D});   /* km, 1 Master-px ≈ 1 km */
+    /* Feinstufe: 2-km-Schritte rund um den Grobtreffer —
+       Regen zieht in 15 min meist nur 5–12 km, die Grobstufe
+       allein rundet das auf null (darum bewegte sich nichts) */
+    let fb=1e18,fx=bx*4,fy=by*4;
+    for(let oy=by*4-5;oy<=by*4+5;oy++)for(let ox=bx*4-5;ox<=bx*4+5;ox++){
+      const sc=sad(F.fr[j],F.fr[j+1],F.sw,F.sh,ox,oy,2);
+      if(sc<fb){fb=sc;fx=ox;fy=oy}
+    }
+    M.motion.push({kx:fx*2,ky:fy*2});   /* km */
   }
 }
 const AT_MIDCOS=Math.cos((AT.s+AT.n)/2*Math.PI/180);
