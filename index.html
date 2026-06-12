@@ -121,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v4.4</div>
+  <div class="sub">GeoSphere Austria · INCA · v4.5</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -333,7 +333,7 @@ const raf=()=>new Promise(r=>requestAnimationFrame(r));
 /* ---------- Preloader ---------- */
 let progDone=0,progTotal=1;
 function progInit(total,label){progDone=0;progTotal=total;progSet(0,label)}
-function progTick(label){progDone++;progSet(progDone/progTotal,label)}
+function progTick(label,w){progDone+=(w||1);progSet(progDone/progTotal,label)}
 function progSet(f,label){
   const p=Math.min(100,Math.round(f*100));
   $('pct').textContent=p+'%';
@@ -377,11 +377,11 @@ const M={gW:0,gH:0,times:[],grids:[],motion:[]};
 const worker=new Worker(URL.createObjectURL(
   new Blob([document.getElementById('wsrc').textContent],{type:'text/javascript'})));
 function preloadAustria(showSplash){
-  if(showSplash)progInit(STRIPES*2+MAX_FUTURE,'Verbinde mit GeoSphere …');
+  if(showSplash)progInit(STRIPES*2*8+MAX_FUTURE+6,'Verbinde mit GeoSphere …');
   return new Promise((resolve,reject)=>{
     const onMsg=e=>{
       const d=e.data;
-      if(d.type==='prog'){if(showSplash)progTick(d.label)}
+      if(d.type==='prog'){if(showSplash)progTick(d.label,8)}
       else if(d.type==='done'){
         worker.removeEventListener('message',onMsg);
         resolve({times:d.times,grids:d.grids.map(b=>new Uint8Array(b)),motion:d.motion});
@@ -423,6 +423,60 @@ const MorphLayer=L.Layer.extend({
   }
 });
 const morphLayer=new MorphLayer();
+
+/* ---------- WebGL-Quantizer ----------
+   Die 2D-Variante (getImageData pro Bild) erzeugte >20 MB/s
+   Speichermüll → periodische GC-Ruckler ("springt alle paar
+   Minuten"). Der Shader macht Bilinear-Upscale + Klassen-Lookup
+   komplett auf der GPU: kein Readback, kein Müll, 60 fps. */
+const GLQ=(function(){
+  try{
+    const cv=morphLayer.canvas;
+    const gl=cv.getContext('webgl',{premultipliedAlpha:true,alpha:true,antialias:false});
+    if(!gl)return null;
+    const sh=(t,src)=>{const x=gl.createShader(t);gl.shaderSource(x,src);gl.compileShader(x);
+      if(!gl.getShaderParameter(x,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(x));return x};
+    const pr=gl.createProgram();
+    gl.attachShader(pr,sh(gl.VERTEX_SHADER,
+      'attribute vec2 p;varying vec2 uv;void main(){uv=p;gl_Position=vec4(p*2.0-1.0,0.0,1.0);}'));
+    gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,
+      'precision mediump float;varying vec2 uv;uniform sampler2D t;uniform vec4 pal[8];'+
+      'void main(){float g=texture2D(t,uv).r*255.0;float lf=floor(g/32.0+0.5);'+
+      'if(lf<1.0){gl_FragColor=vec4(0.0);return;}'+
+      'int l=int(min(lf,7.0));vec4 c=pal[1];'+
+      'if(l==2)c=pal[2];else if(l==3)c=pal[3];else if(l==4)c=pal[4];'+
+      'else if(l==5)c=pal[5];else if(l==6)c=pal[6];else if(l==7)c=pal[7];'+
+      'gl_FragColor=vec4(c.rgb*c.a,c.a);}'));
+    gl.linkProgram(pr);
+    if(!gl.getProgramParameter(pr,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(pr));
+    gl.useProgram(pr);
+    const buf=gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([0,0,1,0,0,1,1,1]),gl.STATIC_DRAW);
+    const loc=gl.getAttribLocation(pr,'p');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+    const pal=new Float32Array(32);
+    for(let l=1;l<8;l++){const c=CLASS_RGBA[l];
+      pal[l*4]=c[0]/255;pal[l*4+1]=c[1]/255;pal[l*4+2]=c[2]/255;pal[l*4+3]=c[3]/255}
+    gl.uniform4fv(gl.getUniformLocation(pr,'pal'),pal);
+    const tex=gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D,tex);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0,0,0,0);
+    return{draw(src){
+      gl.viewport(0,0,morphLayer.canvas.width,morphLayer.canvas.height);
+      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,src);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+    }};
+  }catch(e){console.warn('WebGL nicht verfügbar, 2D-Fallback:',e);return null}
+})();
 
 /* ---------- Viewport: geglättete Graustufen-Frames bauen ---------- */
 const V={cnvs:null,gw:0,gh:0,W:0,H:0,tmp:document.createElement('canvas')};
@@ -524,14 +578,18 @@ function drawMorph(p,force){
     requestAnimationFrame(()=>drawMorph(pos,true));  /* auch pausiert weiterblenden */
   }
   t.globalAlpha=1;
-  const o=morphLayer.canvas.getContext('2d');
-  o.imageSmoothingEnabled=true;o.imageSmoothingQuality='high';
-  o.clearRect(0,0,V.W,V.H);
-  o.drawImage(V.tmp,0,0,V.W,V.H);
-  const img=o.getImageData(0,0,V.W,V.H);
-  const u8=img.data,u32=new Uint32Array(u8.buffer);
-  for(let k=0,K=V.W*V.H;k<K;k++)u32[k]=LUT[u8[k*4]];
-  o.putImageData(img,0,0);
+  if(GLQ){
+    GLQ.draw(V.tmp);
+  }else{
+    const o=morphLayer.canvas.getContext('2d');
+    o.imageSmoothingEnabled=true;o.imageSmoothingQuality='high';
+    o.clearRect(0,0,V.W,V.H);
+    o.drawImage(V.tmp,0,0,V.W,V.H);
+    const img=o.getImageData(0,0,V.W,V.H);
+    const u8=img.data,u32=new Uint32Array(u8.buffer);
+    for(let k=0,K=V.W*V.H;k<K;k++)u32[k]=LUT[u8[k*4]];
+    o.putImageData(img,0,0);
+  }
   drawCost=drawCost*0.8+(performance.now()-t0)*0.2;
 }
 
