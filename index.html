@@ -121,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v5.3</div>
+  <div class="sub">GeoSphere Austria · INCA · v5.6</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -427,10 +427,15 @@ const IsoLayer=L.Layer.extend({
     for(let l=1;l<=7;l++){
       const p=document.createElementNS(SVGNS,'path');
       const c=CLASS_RGBA[l];
-      p.setAttribute('fill','rgb('+c[0]+','+c[1]+','+c[2]+')');
+      const col='rgb('+c[0]+','+c[1]+','+c[2]+')';
+      p.setAttribute('fill',col);
       p.setAttribute('fill-opacity',(c[3]/255*0.82).toFixed(3));
       p.setAttribute('fill-rule','evenodd');
-      p.setAttribute('stroke','none');
+      p.setAttribute('stroke',col);
+      p.setAttribute('stroke-opacity',(c[3]/255*0.82).toFixed(3));
+      p.setAttribute('stroke-width','0.6');
+      p.setAttribute('stroke-linejoin','round');
+      p.setAttribute('vector-effect','non-scaling-stroke');
       this.g.appendChild(p);
       this._paths[l]=p;
     }
@@ -467,6 +472,18 @@ const isoLayer=new IsoLayer();
 /* ---- Marching Squares: Schwelle thr auf Feld f (gw×gh) → SVG-Pfad ----
    Liefert gefüllte Kontur aller Zellen mit Wert >= thr. Lineare
    Interpolation der Kantenschnitte → glatte, sub-zellgenaue Linien. */
+function smoothClosed(P){
+  /* geschlossene Catmull-Rom-Spline → kubische Béziers; rundet Ecken */
+  const n=P.length;
+  let d='M'+P[0].x.toFixed(2)+' '+P[0].y.toFixed(2);
+  for(let i=0;i<n;i++){
+    const p0=P[(i-1+n)%n], p1=P[i], p2=P[(i+1)%n], p3=P[(i+2)%n];
+    const c1x=p1.x+(p2.x-p0.x)/6, c1y=p1.y+(p2.y-p0.y)/6;
+    const c2x=p2.x-(p3.x-p1.x)/6, c2y=p2.y-(p3.y-p1.y)/6;
+    d+='C'+c1x.toFixed(2)+' '+c1y.toFixed(2)+' '+c2x.toFixed(2)+' '+c2y.toFixed(2)+' '+p2.x.toFixed(2)+' '+p2.y.toFixed(2);
+  }
+  return d+'Z';
+}
 function isoPath(f,gw,gh,thr,cx0,cy0,cx1,cy1){
   cx0=cx0||0;cy0=cy0||0;cx1=cx1==null?gw:cx1;cy1=cy1==null?gh:cy1;
   let d='';
@@ -520,7 +537,7 @@ function isoPath(f,gw,gh,thr,cx0,cy0,cx1,cy1){
    reduzierter Auflösung (schnell), Konturen sind dann scharf durch Vektor. */
 const F={gw:0,gh:0,fields:null,tmpA:null,tmpB:null,mix:null};
 function buildSmoothFields(){
-  const D=3;
+  const D=2;
   const gw=Math.floor(M.gW/D), gh=Math.floor(M.gH/D);
   F.gw=gw;F.gh=gh;
   F.fields=M.grids.map(g=>{
@@ -532,8 +549,8 @@ function buildSmoothFields(){
       }
       a[y*gw+x]=mx;
     }
-    /* zwei Glättungspässe → runde Konturen */
-    for(let p=0;p<2;p++){
+    /* Glättungspässe → von Natur aus runde Konturen */
+    for(let p=0;p<5;p++){
       for(let i=0;i<n;i++)b[i]=(a[Math.max(0,i-1)]+2*a[i]+a[Math.min(n-1,i+1)])*0.25;
       for(let i=0;i<n;i++)a[i]=(b[Math.max(0,i-gw)]+2*b[i]+b[Math.min(n-1,i+gw)])*0.25;
     }
