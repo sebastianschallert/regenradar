@@ -71,11 +71,15 @@
   .badge.fc{border-color:var(--signal);color:var(--signal)}
 
   .nc{margin-top:12px;padding-top:12px;border-top:1px solid var(--hair2);
-    font-size:13px;color:var(--gray);display:none;gap:8px;align-items:center}
+    display:none;align-items:center;gap:12px}
   .nc.show{display:flex}
-  .nc .ncdot{width:8px;height:8px;background:var(--ink);flex:0 0 auto}
-  .nc.rain .ncdot{background:var(--signal)}
-  .nc b{color:var(--ink);font-weight:600}
+  .nc .mm{display:flex;align-items:baseline;gap:4px;flex:0 0 auto}
+  .nc .mmval{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--ink);line-height:1}
+  .nc .mmunit{font-size:11px;font-weight:500;color:var(--gray)}
+  .nc .ncsep{width:1px;align-self:stretch;background:var(--hair2)}
+  .nc .ncinfo{font-size:12.5px;color:var(--gray);line-height:1.35;min-width:0}
+  .nc .ncinfo b{color:var(--ink);font-weight:600}
+  .nc .ncloc{font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--gray);margin-bottom:1px}
 
   .tl{margin-top:14px}
   .track{position:relative;height:54px;touch-action:none;cursor:grab;overflow:hidden;
@@ -121,7 +125,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.0</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.2</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -149,7 +153,11 @@
     <button class="nowbtn" id="jumpNow" aria-label="Zu Jetzt springen">JETZT</button>
     <div class="badge" id="badge">INCA</div>
   </div>
-  <div class="nc" id="ncTxt"><div class="ncdot"></div><span id="ncMsg"></span></div>
+  <div class="nc" id="ncTxt">
+    <div class="mm"><span class="mmval" id="ncMM">0.0</span><span class="mmunit">mm/h</span></div>
+    <div class="ncsep"></div>
+    <div class="ncinfo"><div class="ncloc" id="ncLoc">Wien</div><span id="ncMsg">–</span></div>
+  </div>
   <div class="tl">
     <div class="track" id="track" role="slider" aria-label="Zeitleiste" tabindex="0">
       <div class="strip" id="strip">
@@ -634,6 +642,7 @@ function applyPos(){
     badge.textContent=source==='inca'?'INCA':'RADAR';badge.classList.remove('fc');
   }
   $('strip').style.transform='translateX('+($('track').clientWidth/2-(pos+0.5)*PPF)+'px)';
+  updateFocusBox();
 }
 addEventListener('resize',()=>frames.length&&applyPos());
 
@@ -765,26 +774,76 @@ async function loadRainViewer(){
 }
 
 /* ---------- Punkt-Prognose ---------- */
-async function pointNowcast(lat,lon){
+/* ---------- Fokus-Punkt + mm/h-Box ----------
+   Holt für GPS-Standort (oder Wien-Fallback) die mm/h-Zeitreihe von INCA
+   (Rückblick + Prognose) und zeigt in der Box live den Wert zur aktuell
+   gewählten Timeline-Position. */
+const focus={lat:48.2082,lon:16.3738,name:'Wien',times:[],vals:[],marker:null};
+function setFocusMarker(){
+  if(focus.marker)map.removeLayer(focus.marker);
+  focus.marker=L.circleMarker([focus.lat,focus.lon],
+    {radius:6,color:'#E03131',weight:2,fillColor:'#fff',fillOpacity:1,zIndexOffset:1000}).addTo(map);
+}
+async function loadFocusSeries(){
   try{
-    const url=`${GS_API}/timeseries/forecast/nowcast-v1-15min-1km?parameters=rr&lat_lon=${lat.toFixed(4)},${lon.toFixed(4)}`;
-    const res=await fetch(url);if(!res.ok)return;
-    const j=await res.json();
-    const ts=j.timestamps||[];
-    const data=j.features?.[0]?.properties?.parameters?.rr?.data||[];
-    const box=$('ncTxt'),msg=$('ncMsg');
-    const first=data.findIndex(v=>v!=null&&v>=0.1);
-    if(first===-1){
-      box.classList.remove('rain');
-      msg.innerHTML='<b>Kein Regen</b> in den nächsten Stunden an deinem Standort';
-    }else{
-      const mins=Math.max(0,Math.round((Date.parse(ts[first])-Date.now())/60000));
-      box.classList.add('rain');
-      msg.innerHTML=mins<=5?'<b>Es regnet</b> gerade an deinem Standort'
-        :`<b>Regen ab ca. ${fmt(Date.parse(ts[first]))}</b> · in ~${relFmt(mins)}`;
-    }
-    box.classList.add('show');
+    const end=new Date(),start=new Date(Date.now()-PAST_MIN*60000);
+    const ll=focus.lat.toFixed(4)+','+focus.lon.toFixed(4);
+    const [nc,hi]=await Promise.allSettled([
+      fetch(`${GS_API}/timeseries/forecast/nowcast-v1-15min-1km?parameters=rr&lat_lon=${ll}`).then(r=>r.json()),
+      fetch(`${GS_API}/timeseries/historical/inca-v1-15min-1km?parameters=rr&lat_lon=${ll}`+
+        `&start=${start.toISOString().slice(0,16)}&end=${end.toISOString().slice(0,16)}`).then(r=>r.json())
+    ]);
+    const map2=new Map();
+    const add=j=>{
+      const ts=(j&&j.timestamps)||[];
+      const d=j&&j.features&&j.features[0]&&j.features[0].properties&&j.features[0].properties.parameters&&j.features[0].properties.parameters.rr&&j.features[0].properties.parameters.rr.data||[];
+      for(let i=0;i<ts.length;i++)if(d[i]!=null)map2.set(Date.parse(ts[i]),d[i]);
+    };
+    if(hi.status==='fulfilled')add(hi.value);
+    if(nc.status==='fulfilled')add(nc.value);
+    focus.times=[...map2.keys()].sort((a,b)=>a-b);
+    focus.vals=focus.times.map(t=>map2.get(t));
+    $('ncLoc').textContent=focus.name;
+    $('ncTxt').classList.add('show');
+    updateFocusBox();
   }catch(e){}
+}
+/* mm/h-Wert linear zur aktuellen Anzeige-Zeit interpolieren */
+function focusValueAt(tMs){
+  const T=focus.times,V=focus.vals;
+  if(!T.length)return null;
+  if(tMs<=T[0])return V[0];
+  if(tMs>=T[T.length-1])return V[V.length-1];
+  for(let i=0;i<T.length-1;i++){
+    if(tMs<T[i+1]){
+      const f=(tMs-T[i])/(T[i+1]-T[i]);
+      return V[i]*(1-f)+V[i+1]*f;
+    }
+  }
+  return V[V.length-1];
+}
+function updateFocusBox(){
+  if(!focus.times.length||!frames.length)return;
+  const i=Math.floor(pos),f=pos-i;
+  const tA=frames[i].time,tB=frames[Math.min(i+1,frames.length-1)].time;
+  const tNow=tA+(tB-tA)*f;
+  const v=focusValueAt(tNow)||0;
+  $('ncMM').textContent=v<0.05?'0.0':(v<1?v.toFixed(1):v.toFixed(v<10?1:0));
+  /* nächster Regen ab jetzt */
+  const now=Date.now();
+  let firstRain=-1;
+  for(let k=0;k<focus.times.length;k++)
+    if(focus.times[k]>=now-300000&&focus.vals[k]>=0.1){firstRain=k;break}
+  const msg=$('ncMsg');
+  if(v>=0.1){
+    msg.innerHTML='<b>Regen</b> zur gewählten Zeit';
+  }else if(firstRain===-1){
+    msg.innerHTML='Kein Regen in den nächsten Stunden';
+  }else{
+    const mins=Math.max(0,Math.round((focus.times[firstRain]-now)/60000));
+    msg.innerHTML=mins<=5?'<b>Es regnet</b> gerade'
+      :`<b>Regen ab ${fmt(focus.times[firstRain])}</b> · in ~${relFmt(mins)}`;
+  }
 }
 async function getPosition(){
   const Geo=window.Capacitor?.Plugins?.Geolocation;
@@ -801,9 +860,10 @@ async function getPosition(){
 $('locate').addEventListener('click',async()=>{
   try{
     const ll=await getPosition();
+    focus.lat=ll[0];focus.lon=ll[1];focus.name='Mein Standort';
     map.flyTo(ll,11,{duration:.8});
-    L.circleMarker(ll,{radius:7,color:'#E03131',weight:2,fillColor:'#E03131',fillOpacity:.35}).addTo(map);
-    pointNowcast(ll[0],ll[1]);
+    setFocusMarker();
+    loadFocusSeries();
   }catch(e){toast('Standort nicht freigegeben')}
 });
 
@@ -828,6 +888,10 @@ map.on('moveend zoomend',()=>{
     await renderView(true);
     progSet(1,'Fertig');
     splashDone();
+    /* Fokus startet auf Wien (kein Standort-Dialog beim ersten Öffnen);
+       GPS aktiviert man bewusst über den ◎-Button */
+    setFocusMarker();
+    loadFocusSeries();
   }catch(e){
     console.warn('INCA fehlgeschlagen:',e);
     progSet(1,'Fallback …');
