@@ -121,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v5.9</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.0</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -416,59 +416,36 @@ function preloadAustria(showSplash){
    bei jedem Zoom, kein Canvas-Readback (= kein GC-Ruckeln). */
 const SVGNS='http://www.w3.org/2000/svg';
 
-const IsoLayer=L.Layer.extend({
-  initialize(){
-    this.svg=document.createElementNS(SVGNS,'svg');
-    this.svg.setAttribute('class','leaflet-zoom-animated');
-    this.svg.style.cssText='position:absolute;left:0;top:0;pointer-events:none;will-change:transform;overflow:visible';
-    this.g=document.createElementNS(SVGNS,'g');
-    this.svg.appendChild(this.g);
-    this._paths=[];   /* ein <path> je Klasse 1..7 */
-    for(let l=1;l<=7;l++){
-      const p=document.createElementNS(SVGNS,'path');
-      const c=CLASS_RGBA[l];
-      const col='rgb('+c[0]+','+c[1]+','+c[2]+')';
-      p.setAttribute('fill',col);
-      p.setAttribute('fill-opacity',(c[3]/255*0.82).toFixed(3));
-      p.setAttribute('fill-rule','nonzero');
-      p.setAttribute('stroke','none');
-      p.setAttribute('shape-rendering','geometricPrecision');
-      p.removeAttribute('stroke');
-      this.g.appendChild(p);
-      this._paths[l]=p;
-    }
-  },
-  onAdd(m){this._map=m;m.getPanes().overlayPane.appendChild(this.svg);
-    m.on('zoomanim',this._anim,this);m.on('moveend zoomend viewreset',this._place,this);this._place()},
-  onRemove(m){this.svg.remove();
-    m.off('zoomanim',this._anim,this);m.off('moveend zoomend viewreset',this._place,this)},
-  /* Geo-Bezugsrahmen des Master-Rasters (ganz AT) */
-  _place(){
-    if(!this._map)return;
-    const tl=this._map.latLngToLayerPoint([AT.n,AT.w]);
-    const br=this._map.latLngToLayerPoint([AT.s,AT.e]);
-    const w=br.x-tl.x, h=br.y-tl.y;
-    this._baseZoom=this._map.getZoom();
-    L.DomUtil.setTransform(this.svg,tl,1);   /* Scale auf 1 zurück, Position neu */
-    this.svg.setAttribute('width',w);
-    this.svg.setAttribute('height',h);
-    this.svg.setAttribute('viewBox','0 0 '+M.gW+' '+M.gH);
-    this._w=w;this._h=h;
-  },
-  _anim(e){
-    /* Während der Zoom-Animation: ein einziges CSS-Transform (Position +
-       Skalierung), das Leaflet GPU-beschleunigt mitführt → Radar zoomt
-       synchron mit der Karte, statt erst beim Loslassen nachzuspringen. */
-    if(!this._w)return;
-    const scale=this._map.getZoomScale(e.zoom,this._baseZoom);
-    const tl=this._map._latLngToNewLayerPoint([AT.n,AT.w],e.zoom,e.center);
-    L.DomUtil.setTransform(this.svg,tl,scale);
-  },
-  setPaths(dList){
-    for(let l=1;l<=7;l++)this._paths[l].setAttribute('d',dList[l]||'');
-  }
-});
-const isoLayer=new IsoLayer();
+/* SVG-Element vorbereiten (viewBox = Pflicht, damit Leaflet beim Zoom
+   korrekt mitskaliert — das ist der Kern des Fixes). */
+const isoSvg=document.createElementNS(SVGNS,'svg');
+isoSvg.setAttribute('xmlns',SVGNS);
+isoSvg.setAttribute('viewBox','0 0 '+M.gW+' '+M.gH);
+isoSvg.setAttribute('preserveAspectRatio','none');
+const isoG=document.createElementNS(SVGNS,'g');
+isoSvg.appendChild(isoG);
+const isoPaths=[];
+for(let l=1;l<=7;l++){
+  const p=document.createElementNS(SVGNS,'path');
+  const c=CLASS_RGBA[l];
+  p.setAttribute('fill','rgb('+c[0]+','+c[1]+','+c[2]+')');
+  p.setAttribute('fill-opacity',(c[3]/255*0.82).toFixed(3));
+  p.setAttribute('fill-rule','nonzero');
+  p.setAttribute('stroke','none');
+  p.setAttribute('shape-rendering','geometricPrecision');
+  isoG.appendChild(p);
+  isoPaths[l]=p;
+}
+/* Geographische Bounds des Master-Rasters = ganz Österreich */
+const isoBounds=L.latLngBounds([[AT.s,AT.w],[AT.n,AT.e]]);
+
+/* Leaflets eingebautes SVGOverlay übernimmt Position + Zoom-Skalierung
+   (erbt von ImageOverlay). setPaths schreibt nur die Pfaddaten. */
+const isoLayer=L.svgOverlay(isoSvg,isoBounds,{opacity:1,interactive:false,className:'leaflet-zoom-animated'});
+isoLayer.setPaths=function(dList){
+  for(let l=1;l<=7;l++)isoPaths[l].setAttribute('d',dList[l]||'');
+};
+/* (alte Custom-Layer entfernt — L.svgOverlay übernimmt das Zoom-Verhalten) */
 
 /* ---- Marching Squares: Schwelle thr auf Feld f (gw×gh) → SVG-Pfad ----
    Liefert gefüllte Kontur aller Zellen mit Wert >= thr. Lineare
@@ -617,7 +594,7 @@ function drawMorph(p,force){
   }
   const dList=[];
   for(let l=1;l<=7;l++)dList[l]=isoPath(mix,gw,gh,LEVEL_THR[l],cx0,cy0,cx1,cy1);
-  isoLayer.svg.setAttribute('viewBox','0 0 '+gw+' '+gh);
+  isoSvg.setAttribute('viewBox','0 0 '+gw+' '+gh);
   isoLayer.setPaths(dList);
   _drawCost=performance.now()-_t0;
 }
@@ -625,8 +602,7 @@ function drawMorph(p,force){
 async function renderView(showProgress){
   if(source!=='inca'||!M.grids.length)return;
   buildSmoothFields();
-  if(!isoLayer._map)isoLayer.addTo(map);
-  isoLayer._place();
+  if(!map.hasLayer(isoLayer))isoLayer.addTo(map);
   if(showProgress){for(let k=0;k<MAX_FUTURE;k++)progTick('Bereite Darstellung …')}
   drawMorph(pos);
 }
@@ -719,7 +695,7 @@ $('jumpNow').addEventListener('click',()=>{pos=nowIdx();applyPos()});
 function clearFrames(){
   frames.forEach(f=>f.overlay&&map.removeLayer(f.overlay));
   frames=[];F.fields=null;
-  if(isoLayer._map)map.removeLayer(isoLayer);
+  if(map.hasLayer(isoLayer))map.removeLayer(isoLayer);
 }
 
 /* ---------- Timeline-Band ---------- */
