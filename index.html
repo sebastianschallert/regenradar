@@ -130,7 +130,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.11</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.13</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -861,7 +861,7 @@ async function loadFocusSeries(){
   try{
     const end=new Date(),start=new Date(Date.now()-PAST_MIN*60000);
     const ll=focus.lat.toFixed(4)+','+focus.lon.toFixed(4);
-    const P='parameters=rr,t2m,ff,dd,ffx,uu,vv';  /* Wind-Keys variieren je Datensatz */
+    const P='parameters=rr,t2m,ff,dd';  /* echte Nowcast-Parameter laut Metadata */
     const [nc]=await Promise.allSettled([
       fetch(`${GS_API}/timeseries/forecast/nowcast-v1-15min-1km?${P}&lat_lon=${ll}`).then(r=>r.json())
     ]);
@@ -883,23 +883,9 @@ async function loadFocusSeries(){
     focus.times=[...maps.rr.keys()].sort((a,b)=>a-b);
     focus.vals=focus.times.map(t=>maps.rr.get(t));
     focus.temp=focus.times.map(t=>maps.t2m&&maps.t2m.get(t));
-    /* Windgeschwindigkeit: erster vorhandener direkter Key, sonst aus uu/vv */
-    const windKey=['ff','ffx'].find(k=>maps[k]&&maps[k].size);
-    const hasUV=maps.uu&&maps.uu.size&&maps.vv&&maps.vv.size;
-    focus.wind=focus.times.map(t=>{
-      if(windKey)return maps[windKey].get(t);
-      if(hasUV){const u=maps.uu.get(t),v=maps.vv.get(t);
-        return(u!=null&&v!=null)?Math.hypot(u,v):null}
-      return null;
-    });
-    const dirKey=maps.dd&&maps.dd.size?'dd':null;
-    focus.wdir=focus.times.map(t=>{
-      if(dirKey)return maps.dd.get(t);
-      if(hasUV){const u=maps.uu.get(t),v=maps.vv.get(t);
-        return(u!=null&&v!=null)?(270-Math.atan2(v,u)*180/Math.PI)%360:null}
-      return null;
-    });
-    focus.hasWind=!!(windKey||hasUV);
+    focus.wind=focus.times.map(t=>maps.ff&&maps.ff.get(t));   /* m/s */
+    focus.wdir=focus.times.map(t=>maps.dd&&maps.dd.get(t));    /* Grad */
+    focus.hasWind=!!(maps.ff&&maps.ff.size);
     $('ncLoc').textContent=focus.name;
     $('ncTxt').classList.add('show');
     updateFocusBox();
@@ -935,9 +921,10 @@ function updateFocusBox(){
   const i=Math.floor(pos),f=pos-i;
   const tA=frames[i].time,tB=frames[Math.min(i+1,frames.length-1)].time;
   const tNow=tA+(tB-tA)*f;
-  const v=focusValueAt(tNow)||0;
+  const v15=focusValueAt(tNow)||0;
+  const v=v15*4;                          /* mm/15min → mm/h */
   $('ncMM').textContent=v<0.05?'0.0':(v<1?v.toFixed(1):v.toFixed(v<10?1:0));
-  $('metRain').classList.toggle('rainon',v>=0.1);
+  $('metRain').classList.toggle('rainon',v>=0.4);
   const tp=seriesAt(focus.temp,tNow);
   $('ncT').textContent=tp==null?'–':Math.round(tp);
   const wd=seriesAt(focus.wind,tNow);
