@@ -121,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v5.0</div>
+  <div class="sub">GeoSphere Austria · INCA · v5.1</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -319,6 +319,21 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{
 }).addTo(map);
 
 const $=id=>document.getElementById(id);
+let _fpsEl=null,_fpsT=0,_fpsN=0;
+if(location.search.includes('fps')){
+  _fpsEl=document.createElement('div');
+  _fpsEl.style.cssText='position:fixed;left:8px;top:calc(env(safe-area-inset-top,0px) + 60px);z-index:5000;background:#000;color:#0f0;font:bold 12px monospace;padding:4px 7px;border-radius:4px;pointer-events:none';
+  document.body.appendChild(_fpsEl);
+}
+function _fpsTick(t,cost){
+  if(!_fpsEl)return;
+  _fpsN++;
+  if(t-_fpsT>=500){
+    const fps=Math.round(_fpsN/((t-_fpsT)/1000));
+    _fpsEl.textContent='FPS '+fps+'  draw '+cost.toFixed(1)+'ms';
+    _fpsT=t;_fpsN=0;
+  }
+}
 const fmt=ms=>new Date(ms).toLocaleTimeString('de-AT',{hour:'2-digit',minute:'2-digit'});
 function relFmt(min){
   const a=Math.abs(min);
@@ -533,8 +548,14 @@ let source=null;
 const nowIdx=()=>{let k=0;frames.forEach((f,j)=>{if(!f.future)k=j});return k};
 let frames=[];
 
-function drawMorph(p){
+let _lastDrawP=-999,_drawCost=0;
+function drawMorph(p,force){
   if(!F.fields||!F.fields.length)return;
+  /* Konturen nur neu berechnen, wenn sich Position spürbar geändert hat
+     (Pfad-Neuberechnung ist das Teure, nicht die Anzeige) */
+  if(!force&&Math.abs(p-_lastDrawP)<0.012)return;
+  const _t0=performance.now();
+  _lastDrawP=p;
   const nn=F.fields.length;
   const i=Math.max(0,Math.min(nn-1,Math.floor(p))), f=Math.max(0,Math.min(1,p-i));
   const A=F.fields[i], B=F.fields[Math.min(i+1,nn-1)], mix=F.mix;
@@ -558,6 +579,7 @@ function drawMorph(p){
   /* viewBox des SVG ist Master-Auflösung → Faktor D ausgleichen */
   isoLayer.svg.setAttribute('viewBox','0 0 '+gw+' '+gh);
   isoLayer.setPaths(dList);
+  _drawCost=performance.now()-_t0;
 }
 
 async function renderView(showProgress){
@@ -643,6 +665,7 @@ function loop(t){
     return;
   }
   applyPos();
+  _fpsTick(t,_drawCost);
 }
 lastT=performance.now();
 requestAnimationFrame(loop);
