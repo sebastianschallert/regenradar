@@ -138,7 +138,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.16</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.17</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -931,9 +931,10 @@ async function loadFocusSeries(){
    Drei unabhängige Modelle für den Fokuspunkt. Pro Stunde zählen wir, wie
    viele "Regen" (>=0.1 mm/h) sagen → Einigkeits-Ampel. */
 const OM_MODELS=[
-  {id:'icon_seamless',name:'ICON'},     /* DWD, top für Mitteleuropa */
-  {id:'ecmwf_ifs025',name:'ECMWF'},     /* europäische Referenz */
-  {id:'gfs_seamless',name:'GFS'}        /* NOAA, unabhängige dritte Meinung */
+  {id:'arome_seamless',name:'GeoSphere'},/* GeoSphere AROME (= Kartenmodell) */
+  {id:'icon_seamless',name:'ICON'},      /* DWD, top für Mitteleuropa */
+  {id:'ecmwf_ifs025',name:'ECMWF'},      /* europäische Referenz */
+  {id:'gfs_seamless',name:'GFS'}         /* NOAA, unabhängige Stimme */
 ];
 async function loadModelCompare(){
   try{
@@ -947,8 +948,9 @@ async function loadModelCompare(){
     const times=h.time.map(t=>Date.parse(t+'Z'));
     /* pro Modell die precipitation-Spalte (Open-Meteo hängt _modelid an) */
     const series=OM_MODELS.map(m=>{
-      const key=Object.keys(h).find(k=>k.startsWith('precipitation')&&k.includes(m.id));
-      return key?h[key]:null;
+      /* exakte Spalte precipitation_<id>; nur falls vorhanden */
+      const key='precipitation_'+m.id;
+      return h[key]||null;
     });
     focus.models={times,series,names:OM_MODELS.map(m=>m.name)};
     updateAgreement();
