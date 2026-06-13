@@ -121,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v5.8</div>
+  <div class="sub">GeoSphere Austria · INCA · v5.9</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -447,19 +447,22 @@ const IsoLayer=L.Layer.extend({
     if(!this._map)return;
     const tl=this._map.latLngToLayerPoint([AT.n,AT.w]);
     const br=this._map.latLngToLayerPoint([AT.s,AT.e]);
-    L.DomUtil.setPosition(this.svg,tl);
     const w=br.x-tl.x, h=br.y-tl.y;
+    this._baseZoom=this._map.getZoom();
+    L.DomUtil.setTransform(this.svg,tl,1);   /* Scale auf 1 zurück, Position neu */
     this.svg.setAttribute('width',w);
     this.svg.setAttribute('height',h);
     this.svg.setAttribute('viewBox','0 0 '+M.gW+' '+M.gH);
     this._w=w;this._h=h;
   },
   _anim(e){
+    /* Während der Zoom-Animation: ein einziges CSS-Transform (Position +
+       Skalierung), das Leaflet GPU-beschleunigt mitführt → Radar zoomt
+       synchron mit der Karte, statt erst beim Loslassen nachzuspringen. */
+    if(!this._w)return;
+    const scale=this._map.getZoomScale(e.zoom,this._baseZoom);
     const tl=this._map._latLngToNewLayerPoint([AT.n,AT.w],e.zoom,e.center);
-    const br=this._map._latLngToNewLayerPoint([AT.s,AT.e],e.zoom,e.center);
-    L.DomUtil.setPosition(this.svg,tl);
-    this.svg.setAttribute('width',br.x-tl.x);
-    this.svg.setAttribute('height',br.y-tl.y);
+    L.DomUtil.setTransform(this.svg,tl,scale);
   },
   setPaths(dList){
     for(let l=1;l<=7;l++)this._paths[l].setAttribute('d',dList[l]||'');
