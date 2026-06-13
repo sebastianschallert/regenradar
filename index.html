@@ -127,7 +127,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.4</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.6</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -182,7 +182,7 @@
    abseits des Haupt-Threads, damit die Animation nie einfriert */
 const GS='https://dataset.api.hub.geosphere.at/v1';
 const AT={s:46.0,w:9.2,n:49.4,e:17.6};
-const STRIPES=6, MAXF=21, PASTMIN=60;
+const STRIPES=6, MAXF=33, PASTMIN=180;   /* 3 h zurück + bis ~8 h Prognose */
 const midCos=Math.cos((AT.s+AT.n)/2*Math.PI/180);
 const gW=Math.round((AT.e-AT.w)*111.32*midCos);
 const gH=Math.round((AT.n-AT.s)*111.32);
@@ -322,7 +322,7 @@ self.onmessage=async e=>{
    ============================================================ */
 const GS_API='https://dataset.api.hub.geosphere.at/v1';
 const AT={s:46.0,w:9.2,n:49.4,e:17.6};
-const STRIPES=6, MAX_FUTURE=21, PAST_MIN=60;
+const STRIPES=6, MAX_FUTURE=33, PAST_MIN=180;
 const END_HOLD=1300;
 const REDUCED=matchMedia('(prefers-reduced-motion: reduce)').matches;
 const PPF=56;
@@ -676,12 +676,17 @@ function commitRefresh(atWrap){
   M.times=pr.times;M.grids=pr.grids;M.motion=pr.motion;
   const NOW=Date.now()+60000;
   frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
-  buildTimeline();
+  buildTimeline();tuneSpeed();
   if(tDisp!=null)pos=posForTime(tDisp);
   buildSmoothFields();
   drawMorph(pos);
 }
-const SEG_MS=1100;         /* feste Dauer pro 15-min-Frame */
+let SEG_MS=1100;           /* Dauer pro Frame, dynamisch gesetzt */
+function tuneSpeed(){
+  /* ganzer Durchlauf zielt auf ~13 s, pro Frame zwischen 380 und 1100 ms */
+  const n=Math.max(1,frames.length-1);
+  SEG_MS=Math.max(380,Math.min(1100,Math.round(13000/n)));
+}
 function loop(t){
   requestAnimationFrame(loop);
   if(!frames.length){lastT=t;return}
@@ -777,7 +782,7 @@ async function loadRainViewer(){
   if(!frames.length)throw new Error('keine Frames');
   source='rainviewer';
   $('srcTxt').textContent='RAINVIEWER';$('liveBadge').classList.add('off');
-  buildTimeline();pos=nowIdx();applyPos();
+  buildTimeline();tuneSpeed();pos=nowIdx();applyPos();
 }
 
 /* ---------- Punkt-Prognose ---------- */
@@ -943,7 +948,7 @@ map.on('moveend zoomend',()=>{
     frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
     source='inca';
     $('srcTxt').textContent='LIVE · INCA';$('liveBadge').classList.remove('off');
-    buildTimeline();pos=nowIdx();
+    buildTimeline();tuneSpeed();pos=nowIdx();
     await renderView(true);
     progSet(1,'Fertig');
     splashDone();
