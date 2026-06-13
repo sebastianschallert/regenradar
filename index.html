@@ -96,6 +96,9 @@
   .seg.hour{top:0;bottom:0;background:#B9B9B0}
   .hlabel{position:absolute;top:35px;transform:translateX(-50%);
     font-size:10px;font-weight:500;color:var(--gray);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .aromemark{position:absolute;top:8px;height:26px;width:1px;background:var(--hair);border-left:1px dashed var(--gray);opacity:.6}
+  .aromemark::after{content:"VORHERSAGE";position:absolute;top:-11px;left:4px;
+    font-size:7.5px;font-weight:700;letter-spacing:.1em;color:var(--gray);white-space:nowrap}
   .nowmk{position:absolute;top:11px;height:20px;width:2px;background:var(--ink)}
   .nowmk::after{content:"JETZT";position:absolute;top:-11px;left:50%;transform:translateX(-50%);
     font-size:8px;font-weight:700;letter-spacing:.13em;color:var(--gray)}
@@ -127,7 +130,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.6</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.11</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -215,6 +218,42 @@ async function fetchGrid(url){
   if(!res.ok)throw new Error('HTTP '+res.status);
   return res.json();
 }
+/* AROME-Grid: rr_acc ist akkumuliert seit Forecast-Start.
+   Schritt 1: stuendliche Differenz = Regen je Stunde (mm/h).
+   Schritt 2: nur jede 3. Stunde als Frame, Wert = Maximum der 3 Stunden.
+   Sauber getrennt -> keine Indexfehler. */
+function writeStripeArome(timeMap,gj,startMs){
+  const ts=(gj.timestamps||[]).map(Date.parse);
+  const maxT=startMs+48*3600000;
+  const isFrame=ts.map(t=>t>=startMs&&t<=maxT&&new Date(t).getHours()%3===0);
+  const grids=ts.map((t,i)=>{
+    if(!isFrame[i])return null;
+    let g=timeMap.get(t);
+    if(!g){g=new Uint8Array(gW*gH);timeMap.set(t,g)}
+    return g;
+  });
+  for(const ft of gj.features||[]){
+    const c=ft.geometry.coordinates;
+    const x=Math.round((c[0]-AT.w)/(AT.e-AT.w)*(gW-1));
+    const y=Math.round((AT.n-c[1])/(AT.n-AT.s)*(gH-1));
+    if(x<0||y<0||x>=gW||y>=gH)continue;
+    const acc=ft.properties&&ft.properties.parameters&&ft.properties.parameters.rr_acc&&ft.properties.parameters.rr_acc.data;
+    if(!acc)continue;
+    const idx=y*gW+x;
+    const hourly=new Array(ts.length).fill(0);
+    for(let t=1;t<ts.length;t++){
+      if(acc[t]==null||acc[t-1]==null)continue;
+      hourly[t]=Math.max(0,acc[t]-acc[t-1]);
+    }
+    for(let t=0;t<ts.length;t++){
+      if(!grids[t])continue;
+      let peak=hourly[t];
+      for(let k=1;k<3&&t-k>=0;k++)if(hourly[t-k]>peak)peak=hourly[t-k];
+      const l=levelFor(peak/4);
+      if(l>grids[t][idx])grids[t][idx]=l;
+    }
+  }
+}
 async function pool(tasks,limit){
   const results=[];let i=0;
   async function workerFn(){
@@ -291,21 +330,29 @@ self.onmessage=async e=>{
       self.postMessage({type:'prog',label:'Lade Prognose …'});
       return true;
     });
-    for(const bb of stripes)tasks.push(async()=>{
-      const gj=await fetchGrid(GS+'/grid/historical/inca-v1-15min-1km?parameters=rr&bbox='+bb+
-        '&start='+start.toISOString().slice(0,16)+'&end='+end.toISOString().slice(0,16)+'&output_format=geojson');
-      writeStripe(timeMap,gj);
-      self.postMessage({type:'prog',label:'Lade Rückblick …'});
-      return true;
-    });
+    /* Rückblick entfällt (Auth). Nowcast = Jetzt + ~3h fein. */
     const res=await pool(tasks,3);
     const ncOk=res.slice(0,STRIPES).some(r=>r===true);
     if(!ncOk)throw new Error('Prognose nicht ladbar');
+
+    /* AROME dahinter anhängen (stündlich, bis ~60h) */
+    const ncTimes=[...timeMap.keys()].sort((a,b)=>a-b);
+    const ncEnd=ncTimes.length?ncTimes[ncTimes.length-1]:Date.now();
+    const aTasks=stripes.map(bb=>async()=>{
+      try{
+        const gj=await fetchGrid(GS+'/grid/forecast/nwp-v1-1h-2500m?parameters=rr_acc&bbox='+bb+'&output_format=geojson');
+        writeStripeArome(timeMap,gj,ncEnd+1);   /* nur Zeiten nach NC-Ende */
+        self.postMessage({type:'prog',label:'Lade Tagesvorhersage …'});
+        return true;
+      }catch(_){return false}
+    });
+    await pool(aTasks,3);
+
     const times=[...timeMap.keys()].sort((a,b)=>a-b);
     const grids=times.map(t=>timeMap.get(t));
     const motion=smoothMotion(computeMotion(grids));
     const bufs=grids.map(g=>g.buffer);
-    self.postMessage({type:'done',times,grids:bufs,motion},bufs);
+    self.postMessage({type:'done',times,grids:bufs,motion,ncEndTime:ncEnd},bufs);
   }catch(err){
     self.postMessage({type:'err',msg:String((err&&err.message)||err)});
   }
@@ -392,7 +439,7 @@ const LUT=new Uint32Array(256);
 })();
 
 /* ---------- Master-Raster-Geometrie (1 px ≈ 1 km) ---------- */
-const M={gW:0,gH:0,times:[],grids:[],motion:[]};
+const M={gW:0,gH:0,times:[],grids:[],motion:[],ncEnd:0};
 (function(){
   const midCos=Math.cos((AT.s+AT.n)/2*Math.PI/180);
   M.gW=Math.round((AT.e-AT.w)*111.32*midCos);
@@ -407,14 +454,14 @@ const M={gW:0,gH:0,times:[],grids:[],motion:[]};
 const worker=new Worker(URL.createObjectURL(
   new Blob([document.getElementById('wsrc').textContent],{type:'text/javascript'})));
 function preloadAustria(showSplash){
-  if(showSplash)progInit(STRIPES*2*8+MAX_FUTURE+6,'Verbinde mit GeoSphere …');
+  if(showSplash)progInit(STRIPES*8+MAX_FUTURE+6,'Verbinde mit GeoSphere …');
   return new Promise((resolve,reject)=>{
     const onMsg=e=>{
       const d=e.data;
       if(d.type==='prog'){if(showSplash)progTick(d.label,8)}
       else if(d.type==='done'){
         worker.removeEventListener('message',onMsg);
-        resolve({times:d.times,grids:d.grids.map(b=>new Uint8Array(b)),motion:d.motion});
+        resolve({times:d.times,grids:d.grids.map(b=>new Uint8Array(b)),motion:d.motion,ncEndTime:d.ncEndTime});
       }else if(d.type==='err'){
         worker.removeEventListener('message',onMsg);
         reject(new Error(d.msg));
@@ -673,7 +720,7 @@ function commitRefresh(atWrap){
     const i=Math.floor(pos),f=pos-i;
     tDisp=frames[i].time+(frames[Math.min(i+1,frames.length-1)].time-frames[i].time)*f;
   }
-  M.times=pr.times;M.grids=pr.grids;M.motion=pr.motion;
+  M.times=pr.times;M.grids=pr.grids;M.motion=pr.motion;M.ncEnd=pr.ncEndTime||M.ncEnd;
   const NOW=Date.now()+60000;
   frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
   buildTimeline();tuneSpeed();
@@ -726,19 +773,31 @@ function buildTimeline(){
   strip.querySelectorAll('.hlabel,.nowmk').forEach(s=>s.remove());
   const n=frames.length;
   strip.style.width=(n*PPF)+'px';
+  let aromeStart=-1;
   for(let j=0;j<n;j++){
-    const onHour=new Date(frames[j].time).getMinutes()===0;
+    const d=new Date(frames[j].time);
+    const onHour=d.getMinutes()===0;
+    const isArome=M.ncEnd&&frames[j].time>M.ncEnd+1800000;
+    if(isArome&&aromeStart<0)aromeStart=j;
     if(j>0){
-      const s=document.createElement('div');
-      s.className='seg'+(onHour?' hour':'');
-      s.style.left=(j*PPF)+'px';rail.appendChild(s);
+      const sg=document.createElement('div');
+      sg.className='seg'+(onHour?' hour':'');
+      sg.style.left=(j*PPF)+'px';rail.appendChild(sg);
     }
     if(onHour){
       const sp=document.createElement('span');
       sp.className='hlabel';
-      sp.textContent=fmt(frames[j].time).replace(':00','');
+      /* AROME über mehrere Tage → bei 00:00 Datum statt Uhrzeit */
+      sp.textContent=(isArome&&d.getHours()===0)
+        ? d.toLocaleDateString('de-AT',{weekday:'short'})
+        : fmt(frames[j].time).replace(':00','');
       sp.style.left=((j+0.5)*PPF)+'px';strip.appendChild(sp);
     }
+  }
+  /* AROME-Bereich dezent absetzen (Trennlinie + Label) */
+  if(aromeStart>0){
+    const div=document.createElement('div');div.className='aromemark';
+    div.style.left=(aromeStart*PPF)+'px';strip.appendChild(div);
   }
   const fi=frames.findIndex(f=>f.future);
   const fs=$('futShade');
@@ -803,11 +862,10 @@ async function loadFocusSeries(){
     const end=new Date(),start=new Date(Date.now()-PAST_MIN*60000);
     const ll=focus.lat.toFixed(4)+','+focus.lon.toFixed(4);
     const P='parameters=rr,t2m,ff,dd,ffx,uu,vv';  /* Wind-Keys variieren je Datensatz */
-    const [nc,hi]=await Promise.allSettled([
-      fetch(`${GS_API}/timeseries/forecast/nowcast-v1-15min-1km?${P}&lat_lon=${ll}`).then(r=>r.json()),
-      fetch(`${GS_API}/timeseries/historical/inca-v1-15min-1km?${P}&lat_lon=${ll}`+
-        `&start=${start.toISOString().slice(0,16)}&end=${end.toISOString().slice(0,16)}`).then(r=>r.json())
+    const [nc]=await Promise.allSettled([
+      fetch(`${GS_API}/timeseries/forecast/nowcast-v1-15min-1km?${P}&lat_lon=${ll}`).then(r=>r.json())
     ]);
+    const hi={status:'rejected'};   /* kein Rückblick (Auth) */
     const maps={rr:new Map()};
     const add=j=>{
       const ts=(j&&j.timestamps)||[];
@@ -943,7 +1001,7 @@ map.on('moveend zoomend',()=>{
 (async()=>{
   try{
     const d0=await preloadAustria(true);
-    M.times=d0.times;M.grids=d0.grids;M.motion=d0.motion;
+    M.times=d0.times;M.grids=d0.grids;M.motion=d0.motion;M.ncEnd=d0.ncEndTime||0;
     const NOW=Date.now()+60000;
     frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
     source='inca';
@@ -968,7 +1026,7 @@ map.on('moveend zoomend',()=>{
     try{
       const d=await preloadAustria(false);
       const motion=d.motion;
-      pendingRefresh={times:d.times,grids:d.grids,motion};
+      pendingRefresh={times:d.times,grids:d.grids,motion,ncEndTime:d.ncEndTime};
       if(!playing)commitRefresh();   /* pausiert → sofort übernehmen */
     }catch(e){}
   },600000);
