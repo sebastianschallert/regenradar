@@ -121,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v5.1</div>
+  <div class="sub">GeoSphere Austria · INCA · v5.2</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -467,7 +467,8 @@ const isoLayer=new IsoLayer();
 /* ---- Marching Squares: Schwelle thr auf Feld f (gw×gh) → SVG-Pfad ----
    Liefert gefüllte Kontur aller Zellen mit Wert >= thr. Lineare
    Interpolation der Kantenschnitte → glatte, sub-zellgenaue Linien. */
-function isoPath(f,gw,gh,thr){
+function isoPath(f,gw,gh,thr,cx0,cy0,cx1,cy1){
+  cx0=cx0||0;cy0=cy0||0;cx1=cx1==null?gw:cx1;cy1=cy1==null?gh:cy1;
   let d='';
   const at=(x,y)=>f[y*gw+x];
   /* Zellgitter (gw-1)×(gh-1); pro Zelle Standard-MS-Cases als Liniensegmente,
@@ -476,8 +477,8 @@ function isoPath(f,gw,gh,thr){
   /* Performanter Ansatz: pro Zelle, die >=thr ist, ein Quadrat; Kanten
      zu Nachbarn <thr werden interpoliert eingezogen → glatte Ränder. */
   const t=thr;
-  for(let y=0;y<gh-1;y++){
-    for(let x=0;x<gw-1;x++){
+  for(let y=Math.max(0,cy0);y<Math.min(gh-1,cy1);y++){
+    for(let x=Math.max(0,cx0);x<Math.min(gw-1,cx1);x++){
       const v00=at(x,y),v10=at(x+1,y),v01=at(x,y+1),v11=at(x+1,y+1);
       let idx=0;
       if(v00>=t)idx|=1; if(v10>=t)idx|=2; if(v11>=t)idx|=4; if(v01>=t)idx|=8;
@@ -519,8 +520,7 @@ function isoPath(f,gw,gh,thr){
    reduzierter Auflösung (schnell), Konturen sind dann scharf durch Vektor. */
 const F={gw:0,gh:0,fields:null,tmpA:null,tmpB:null,mix:null};
 function buildSmoothFields(){
-  /* Master grob auf ~halbe Auflösung mitteln für Tempo, dann glätten */
-  const D=2;
+  const D=3;
   const gw=Math.floor(M.gW/D), gh=Math.floor(M.gH/D);
   F.gw=gw;F.gh=gh;
   F.fields=M.grids.map(g=>{
@@ -570,13 +570,31 @@ function drawMorph(p,force){
     if(xi<0||yi<0||xi>=gw||yi>=gh)return 0;
     return fld[yi*gw+xi];
   };
-  for(let y=0;y<gh;y++)for(let x=0;x<gw;x++){
+  let mx0=0,my0=0,mx1=gw,my1=gh;
+  if(map&&map.getBounds){
+    const bb=map.getBounds();
+    const f2x=lon=>(lon-AT.w)/(AT.e-AT.w)*gw, f2y=lat=>(AT.n-lat)/(AT.n-AT.s)*gh;
+    mx0=Math.max(0,Math.floor(f2x(bb.getWest())-4));
+    mx1=Math.min(gw,Math.ceil(f2x(bb.getEast())+4));
+    my0=Math.max(0,Math.floor(f2y(bb.getNorth())-4));
+    my1=Math.min(gh,Math.ceil(f2y(bb.getSouth())+4));
+  }
+  mix.fill(0);
+  for(let y=my0;y<my1;y++)for(let x=mx0;x<mx1;x++){
     const va=sample(A,x-ax,y-ay), vb=sample(B,x-bx,y-by);
     mix[y*gw+x]=va*(1-f)+vb*f;
   }
+  let cx0=0,cy0=0,cx1=gw,cy1=gh;
+  if(map&&map.getBounds){
+    const bb=map.getBounds();
+    const f2x=lon=>(lon-AT.w)/(AT.e-AT.w)*gw, f2y=lat=>(AT.n-lat)/(AT.n-AT.s)*gh;
+    cx0=Math.max(0,Math.floor(f2x(bb.getWest())-3));
+    cx1=Math.min(gw,Math.ceil(f2x(bb.getEast())+3));
+    cy0=Math.max(0,Math.floor(f2y(bb.getNorth())-3));
+    cy1=Math.min(gh,Math.ceil(f2y(bb.getSouth())+3));
+  }
   const dList=[];
-  for(let l=1;l<=7;l++)dList[l]=isoPath(mix,gw,gh,LEVEL_THR[l]);
-  /* viewBox des SVG ist Master-Auflösung → Faktor D ausgleichen */
+  for(let l=1;l<=7;l++)dList[l]=isoPath(mix,gw,gh,LEVEL_THR[l],cx0,cy0,cx1,cy1);
   isoLayer.svg.setAttribute('viewBox','0 0 '+gw+' '+gh);
   isoLayer.setPaths(dList);
   _drawCost=performance.now()-_t0;
@@ -792,7 +810,12 @@ $('locate').addEventListener('click',async()=>{
 });
 
 /* ---------- Neu rendern bei Pan/Zoom (lokal) ---------- */
-/* Pan/Zoom: SVG-Isolinien skalieren automatisch mit, kein Re-Render nötig */
+let _mvT=null;
+map.on('moveend zoomend',()=>{
+  if(source!=='inca')return;
+  clearTimeout(_mvT);
+  _mvT=setTimeout(()=>drawMorph(pos,true),120);
+});
 
 /* ---------- Boot ---------- */
 (async()=>{
