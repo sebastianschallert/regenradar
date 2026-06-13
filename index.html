@@ -121,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v4.5</div>
+  <div class="sub">GeoSphere Austria · INCA · v4.6</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -544,13 +544,11 @@ async function renderView(showProgress){
 }
 
 /* ---------- DER Morph: Feld interpolieren, EINMAL quantisieren ---------- */
-let drawCost=6,skipBeat=0,fadeSnap=null;
+let fadeSnap=null;
 function drawMorph(p,force){
   if(!V.cnvs||!V.cnvs.length)return;
   /* Gleichmäßigkeit schlägt Rate: bei teurem Frame stabil JEDEN
      zweiten Takt zeichnen statt unregelmäßig zu drosseln */
-  if(!force&&drawCost>15){skipBeat^=1;if(skipBeat)return}
-  const t0=performance.now();
   const nn=V.cnvs.length;
   const i=Math.max(0,Math.min(nn-1,Math.floor(p))), f=Math.max(0,Math.min(1,p-i));
   const t=V.tmp.getContext('2d');
@@ -590,7 +588,6 @@ function drawMorph(p,force){
     for(let k=0,K=V.W*V.H;k<K;k++)u32[k]=LUT[u8[k*4]];
     o.putImageData(img,0,0);
   }
-  drawCost=drawCost*0.8+(performance.now()-t0)*0.2;
 }
 
 /* ---------- Anzeige / Engine ---------- */
@@ -669,22 +666,24 @@ function commitRefresh(atWrap){
     renderView(false);
   }
 }
+const SEG_MS=900;          /* feste Dauer pro 15-min-Frame */
 function loop(t){
   requestAnimationFrame(loop);
-  if(!playing||!frames.length){lastT=t;return}
+  if(!frames.length){lastT=t;return}
+  if(!playing){lastT=t;return}
   if(t<holdUntil){lastT=t;return}
-  const dt=Math.min(t-lastT,100);lastT=t;
-  if(REDUCED){
-    loop._acc=(loop._acc||0)+dt;
-    if(loop._acc>=frameMs()){loop._acc=0;pos=Math.floor(pos)+1;
-      if(pos>frames.length-1){pos=0;commitRefresh(true);holdUntil=t+END_HOLD}}
-  }else{
-    pos+=dt/frameMs();
-    if(pos>=frames.length-1){pos=frames.length-1;applyPos();holdUntil=t+END_HOLD;
-      setTimeout(()=>{if(playing){pos=0;commitRefresh(true)}},END_HOLD);return}
+  let dt=t-lastT;lastT=t;
+  if(dt>200)dt=SEG_MS;      /* nach Tab-Wechsel/Hänger nicht springen */
+  pos+=dt/SEG_MS;
+  if(pos>=frames.length-1){
+    pos=frames.length-1;applyPos();
+    holdUntil=t+END_HOLD;
+    setTimeout(()=>{if(playing){pos=0;commitRefresh(true)}},END_HOLD);
+    return;
   }
   applyPos();
 }
+lastT=performance.now();
 requestAnimationFrame(loop);
 
 function setPlaying(p){playing=p;
