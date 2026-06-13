@@ -121,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v4.6</div>
+  <div class="sub">GeoSphere Austria · INCA · v4.8</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -429,8 +429,10 @@ const morphLayer=new MorphLayer();
    Speichermüll → periodische GC-Ruckler ("springt alle paar
    Minuten"). Der Shader macht Bilinear-Upscale + Klassen-Lookup
    komplett auf der GPU: kein Readback, kein Müll, 60 fps. */
-const GLQ=(function(){
+const GLQ=null;
+const _GLQ_unused=(function(){
   try{
+    return null; // WebGL deaktiviert (verursachte Sub-Pixel-Flackern)
     const cv=morphLayer.canvas;
     const gl=cv.getContext('webgl',{premultipliedAlpha:true,alpha:true,antialias:false});
     if(!gl)return null;
@@ -479,7 +481,7 @@ const GLQ=(function(){
 })();
 
 /* ---------- Viewport: geglättete Graustufen-Frames bauen ---------- */
-const V={cnvs:null,gw:0,gh:0,W:0,H:0,tmp:document.createElement('canvas')};
+const V={cnvs:null,gw:0,gh:0,W:0,H:0,tmp:document.createElement('canvas'),octx:null,imgData:null};
 function makeFieldCanvas(grid,gx0,gy0,gw,gh){
   const n=gw*gh;
   const a=new Float32Array(n), b=new Float32Array(n);
@@ -537,6 +539,9 @@ async function renderView(showProgress){
   V.geo={gx0,gy0,gw,gh,S};
   V.tmp.width=gw;V.tmp.height=gh;
   morphLayer.canvas.width=V.W;morphLayer.canvas.height=V.H;
+  V.octx=morphLayer.canvas.getContext('2d');
+  V.octx.imageSmoothingEnabled=true;V.octx.imageSmoothingQuality='high';
+  V.imgData=V.octx.createImageData(V.W,V.H);
   morphLayer.setBounds([[bs,bw],[bn,be]]);
   if(!morphLayer._map)morphLayer.addTo(map);
   renderedRect={gx0,gy0,gx1:gx0+gw,gy1:gy0+gh};
@@ -576,18 +581,14 @@ function drawMorph(p,force){
     requestAnimationFrame(()=>drawMorph(pos,true));  /* auch pausiert weiterblenden */
   }
   t.globalAlpha=1;
-  if(GLQ){
-    GLQ.draw(V.tmp);
-  }else{
-    const o=morphLayer.canvas.getContext('2d');
-    o.imageSmoothingEnabled=true;o.imageSmoothingQuality='high';
-    o.clearRect(0,0,V.W,V.H);
-    o.drawImage(V.tmp,0,0,V.W,V.H);
-    const img=o.getImageData(0,0,V.W,V.H);
-    const u8=img.data,u32=new Uint32Array(u8.buffer);
-    for(let k=0,K=V.W*V.H;k<K;k++)u32[k]=LUT[u8[k*4]];
-    o.putImageData(img,0,0);
-  }
+  const o=V.octx||morphLayer.canvas.getContext('2d');
+  o.clearRect(0,0,V.W,V.H);
+  o.drawImage(V.tmp,0,0,V.W,V.H);
+  /* Graustufen-Lesepuffer einmalig, danach wiederverwendet → kein GC-Müll */
+  const src=o.getImageData(0,0,V.W,V.H).data;
+  const u32=new Uint32Array(V.imgData.data.buffer);
+  for(let k=0,K=V.W*V.H;k<K;k++)u32[k]=LUT[src[k*4]];
+  o.putImageData(V.imgData,0,0);
 }
 
 /* ---------- Anzeige / Engine ---------- */
