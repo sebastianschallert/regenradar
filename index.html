@@ -82,6 +82,14 @@
   .nc .ncbottom{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--gray)}
   .nc .ncloc{font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink)}
   .nc .ncbottom b{color:var(--ink);font-weight:600}
+  .nc .agree{display:none;align-items:center;gap:7px;margin-top:7px;
+    font-size:12px;color:var(--gray)}
+  .nc .agree.show{display:flex}
+  .nc .agreedot{width:9px;height:9px;border-radius:50%;flex:0 0 auto;background:var(--gray)}
+  .nc .agree.high .agreedot{background:#2FA84F}      /* grün: einig */
+  .nc .agree.mid .agreedot{background:#E8A23D}       /* gelb: teils */
+  .nc .agree.low .agreedot{background:var(--signal)} /* rot: uneinig */
+  .nc .agree b{color:var(--ink);font-weight:600}
 
   .tl{margin-top:14px}
   .track{position:relative;height:54px;touch-action:none;cursor:grab;overflow:hidden;
@@ -130,7 +138,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.13</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.16</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -167,6 +175,10 @@
       <span class="met" id="metWind"><span class="v" id="ncW">–</span><span class="u">km/h</span><span class="u" id="ncWdir"></span></span>
     </div>
     <div class="ncbottom"><span class="ncloc" id="ncLoc">Wien</span><span id="ncMsg">–</span></div>
+    <div class="agree" id="agreeRow">
+      <span class="agreedot" id="agreeDot"></span>
+      <span id="agreeTxt">Modelle werden verglichen …</span>
+    </div>
   </div>
   <div class="tl">
     <div class="track" id="track" role="slider" aria-label="Zeitleiste" tabindex="0">
@@ -697,6 +709,7 @@ function applyPos(){
   }
   $('strip').style.transform='translateX('+($('track').clientWidth/2-(pos+0.5)*PPF)+'px)';
   updateFocusBox();
+  updateAgreement();
 }
 addEventListener('resize',()=>frames.length&&applyPos());
 
@@ -849,7 +862,7 @@ async function loadRainViewer(){
    Holt für GPS-Standort (oder Wien-Fallback) die mm/h-Zeitreihe von INCA
    (Rückblick + Prognose) und zeigt in der Box live den Wert zur aktuell
    gewählten Timeline-Position. */
-const focus={lat:48.2082,lon:16.3738,name:'Wien',times:[],vals:[],temp:[],wind:[],wdir:[],hasWind:false,marker:null};
+const focus={lat:48.2082,lon:16.3738,name:'Wien',times:[],vals:[],temp:[],wind:[],wdir:[],hasWind:false,marker:null,models:null};
 const WDIRS=['N','NO','O','SO','S','SW','W','NW'];
 const windArrow=deg=>{const a=['↑','↗','→','↘','↓','↙','←','↖'];return a[Math.round(((deg||0)%360)/45)%8]};
 function setFocusMarker(){
@@ -859,41 +872,121 @@ function setFocusMarker(){
 }
 async function loadFocusSeries(){
   try{
-    const end=new Date(),start=new Date(Date.now()-PAST_MIN*60000);
     const ll=focus.lat.toFixed(4)+','+focus.lon.toFixed(4);
-    const P='parameters=rr,t2m,ff,dd';  /* echte Nowcast-Parameter laut Metadata */
-    const [nc]=await Promise.allSettled([
-      fetch(`${GS_API}/timeseries/forecast/nowcast-v1-15min-1km?${P}&lat_lon=${ll}`).then(r=>r.json())
+    /* Nowcast (15min, ~3h) + AROME (1h, bis 48h) parallel holen */
+    const [nc,ar]=await Promise.allSettled([
+      fetch(`${GS_API}/timeseries/forecast/nowcast-v1-15min-1km?parameters=rr,t2m,ff,dd&lat_lon=${ll}`).then(r=>r.json()),
+      fetch(`${GS_API}/timeseries/forecast/nwp-v1-1h-2500m?parameters=rr_acc,t2m,u10m,v10m&lat_lon=${ll}`).then(r=>r.json())
     ]);
-    const hi={status:'rejected'};   /* kein Rückblick (Auth) */
-    const maps={rr:new Map()};
-    const add=j=>{
-      const ts=(j&&j.timestamps)||[];
-      const pr=j&&j.features&&j.features[0]&&j.features[0].properties&&j.features[0].properties.parameters;
-      if(!pr)return;
-      /* alle gelieferten Parameter einsammeln, auch unbekannte Wind-Keys */
-      for(const key in pr){
-        const d=pr[key]&&pr[key].data;if(!d)continue;
-        if(!maps[key])maps[key]=new Map();
-        for(let i=0;i<ts.length;i++)if(d[i]!=null)maps[key].set(Date.parse(ts[i]),d[i]);
+    /* Maps je Größe: rr15(mm/15min), rrH(mm/h), temp, windms, wdir */
+    const T=new Map(),RR=new Map(),TP=new Map(),WS=new Map(),WD=new Map();
+    /* Nowcast übernehmen */
+    if(nc.status==='fulfilled'){
+      const j=nc.value, ts=(j.timestamps||[]).map(Date.parse);
+      const pr=j.features&&j.features[0]&&j.features[0].properties&&j.features[0].properties.parameters||{};
+      const g=k=>pr[k]&&pr[k].data||[];
+      const rr=g('rr'),tp=g('t2m'),ff=g('ff'),dd=g('dd');
+      for(let i=0;i<ts.length;i++){
+        T.set(ts[i],1);
+        if(rr[i]!=null)RR.set(ts[i],rr[i]*4);      /* mm/15min → mm/h */
+        if(tp[i]!=null)TP.set(ts[i],tp[i]);
+        if(ff[i]!=null)WS.set(ts[i],ff[i]);
+        if(dd[i]!=null)WD.set(ts[i],dd[i]);
       }
-    };
-    if(hi.status==='fulfilled')add(hi.value);
-    if(nc.status==='fulfilled')add(nc.value);
-    focus.times=[...maps.rr.keys()].sort((a,b)=>a-b);
-    focus.vals=focus.times.map(t=>maps.rr.get(t));
-    focus.temp=focus.times.map(t=>maps.t2m&&maps.t2m.get(t));
-    focus.wind=focus.times.map(t=>maps.ff&&maps.ff.get(t));   /* m/s */
-    focus.wdir=focus.times.map(t=>maps.dd&&maps.dd.get(t));    /* Grad */
-    focus.hasWind=!!(maps.ff&&maps.ff.size);
+    }
+    /* AROME anhängen (nur Zeiten nach Nowcast-Ende) */
+    const ncMax=Math.max(0,...[...T.keys()]);
+    if(ar.status==='fulfilled'){
+      const j=ar.value, ts=(j.timestamps||[]).map(Date.parse);
+      const pr=j.features&&j.features[0]&&j.features[0].properties&&j.features[0].properties.parameters||{};
+      const g=k=>pr[k]&&pr[k].data||[];
+      const acc=g('rr_acc'),tp=g('t2m'),u=g('u10m'),v=g('v10m');
+      let prevAcc=null;
+      for(let i=0;i<ts.length;i++){
+        const hourly=(prevAcc==null||acc[i]==null)?0:Math.max(0,acc[i]-prevAcc);
+        if(acc[i]!=null)prevAcc=acc[i];
+        if(ts[i]<=ncMax)continue;                  /* Überlapp: Nowcast gewinnt */
+        T.set(ts[i],1);
+        RR.set(ts[i],hourly);                       /* schon mm/h */
+        if(tp[i]!=null)TP.set(ts[i],tp[i]);
+        if(u[i]!=null&&v[i]!=null){
+          WS.set(ts[i],Math.hypot(u[i],v[i]));
+          WD.set(ts[i],(270-Math.atan2(v[i],u[i])*180/Math.PI)%360);
+        }
+      }
+    }
+    focus.times=[...T.keys()].sort((a,b)=>a-b);
+    focus.vals=focus.times.map(t=>RR.has(t)?RR.get(t):null);  /* mm/h */
+    focus.temp=focus.times.map(t=>TP.has(t)?TP.get(t):null);
+    focus.wind=focus.times.map(t=>WS.has(t)?WS.get(t):null);  /* m/s */
+    focus.wdir=focus.times.map(t=>WD.has(t)?WD.get(t):null);
+    focus.hasWind=WS.size>0;
     $('ncLoc').textContent=focus.name;
     $('ncTxt').classList.add('show');
     updateFocusBox();
+    loadModelCompare();   /* Open-Meteo Modellvergleich (asynchron) */
   }catch(e){}
+}
+/* ---------- Modellvergleich via Open-Meteo (ICON, ECMWF, AROME) ----------
+   Drei unabhängige Modelle für den Fokuspunkt. Pro Stunde zählen wir, wie
+   viele "Regen" (>=0.1 mm/h) sagen → Einigkeits-Ampel. */
+const OM_MODELS=[
+  {id:'icon_seamless',name:'ICON'},     /* DWD, top für Mitteleuropa */
+  {id:'ecmwf_ifs025',name:'ECMWF'},     /* europäische Referenz */
+  {id:'gfs_seamless',name:'GFS'}        /* NOAA, unabhängige dritte Meinung */
+];
+async function loadModelCompare(){
+  try{
+    const ll='latitude='+focus.lat.toFixed(4)+'&longitude='+focus.lon.toFixed(4);
+    const models=OM_MODELS.map(m=>m.id).join(',');
+    const url='https://api.open-meteo.com/v1/forecast?'+ll+
+      '&hourly=precipitation&models='+models+'&forecast_days=3&timezone=UTC';
+    const r=await fetch(url);if(!r.ok)return;
+    const j=await r.json();
+    const h=j.hourly;if(!h||!h.time)return;
+    const times=h.time.map(t=>Date.parse(t+'Z'));
+    /* pro Modell die precipitation-Spalte (Open-Meteo hängt _modelid an) */
+    const series=OM_MODELS.map(m=>{
+      const key=Object.keys(h).find(k=>k.startsWith('precipitation')&&k.includes(m.id));
+      return key?h[key]:null;
+    });
+    focus.models={times,series,names:OM_MODELS.map(m=>m.name)};
+    updateAgreement();
+  }catch(e){}
+}
+function updateAgreement(){
+  const M=focus.models, row=$('agreeRow');
+  if(!M||!frames.length){return}
+  const i=Math.floor(pos),f=pos-i;
+  const tA=frames[i].time,tB=frames[Math.min(i+1,frames.length-1)].time;
+  const tNow=tA+(tB-tA)*f;
+  /* nächsten Stunden-Index im Modellraster finden */
+  let idx=-1,best=1e15;
+  for(let k=0;k<M.times.length;k++){const d=Math.abs(M.times[k]-tNow);if(d<best){best=d;idx=k}}
+  if(idx<0||best>2*3600000){row.classList.remove('show');return}
+  let rain=0,have=0;
+  const detail=[];
+  M.series.forEach((s,mi)=>{
+    if(!s||s[idx]==null)return;
+    have++;
+    const wet=s[idx]>=0.1;
+    if(wet)rain++;
+    detail.push(M.names[mi]+(wet?'✓':'✗'));
+  });
+  if(!have){row.classList.remove('show');return}
+  row.classList.add('show');
+  row.classList.remove('high','mid','low');
+  let txt;
+  if(rain===0){row.classList.add('high');txt='<b>'+have+'/'+have+' Modelle einig:</b> trocken';}
+  else if(rain===have){row.classList.add('high');txt='<b>'+have+'/'+have+' Modelle einig:</b> Regen';}
+  else{row.classList.add('mid');txt='<b>'+rain+'/'+have+' Modelle:</b> Regen ('+detail.join(' ')+')';}
+  $('agreeTxt').innerHTML=txt;
 }
 /* generische Zeitreihen-Interpolation */
 function seriesAt(arr,tMs){
   const T=focus.times;if(!T.length||!arr)return null;
+  /* außerhalb des abgedeckten Zeitraums: kein Wert (ehrlich, statt kleben) */
+  if(tMs<T[0]-450000||tMs>T[T.length-1]+1800000)return null;
   if(tMs<=T[0])return arr[0];
   if(tMs>=T[T.length-1])return arr[arr.length-1];
   for(let i=0;i<T.length-1;i++)if(tMs<T[i+1]){
@@ -902,28 +995,16 @@ function seriesAt(arr,tMs){
   }
   return arr[arr.length-1];
 }
-/* mm/h-Wert linear zur aktuellen Anzeige-Zeit interpolieren */
-function focusValueAt(tMs){
-  const T=focus.times,V=focus.vals;
-  if(!T.length)return null;
-  if(tMs<=T[0])return V[0];
-  if(tMs>=T[T.length-1])return V[V.length-1];
-  for(let i=0;i<T.length-1;i++){
-    if(tMs<T[i+1]){
-      const f=(tMs-T[i])/(T[i+1]-T[i]);
-      return V[i]*(1-f)+V[i+1]*f;
-    }
-  }
-  return V[V.length-1];
-}
+/* mm/h-Wert zur Anzeige-Zeit (nutzt dieselbe null-tolerante Interpolation) */
+function focusValueAt(tMs){return seriesAt(focus.vals,tMs);}
 function updateFocusBox(){
   if(!focus.times.length||!frames.length)return;
   const i=Math.floor(pos),f=pos-i;
   const tA=frames[i].time,tB=frames[Math.min(i+1,frames.length-1)].time;
   const tNow=tA+(tB-tA)*f;
-  const v15=focusValueAt(tNow)||0;
-  const v=v15*4;                          /* mm/15min → mm/h */
-  $('ncMM').textContent=v<0.05?'0.0':(v<1?v.toFixed(1):v.toFixed(v<10?1:0));
+  const vRaw=focusValueAt(tNow);          /* bereits mm/h, null wenn außerhalb */
+  const v=vRaw==null?0:vRaw;
+  $('ncMM').textContent=vRaw==null?'–':(v<0.05?'0.0':(v<1?v.toFixed(1):v.toFixed(v<10?1:0)));
   $('metRain').classList.toggle('rainon',v>=0.4);
   const tp=seriesAt(focus.temp,tNow);
   $('ncT').textContent=tp==null?'–':Math.round(tp);
