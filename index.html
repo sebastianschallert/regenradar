@@ -121,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v4.8</div>
+  <div class="sub">GeoSphere Austria · INCA · v5.0</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -395,204 +395,181 @@ function preloadAustria(showSplash){
   });
 }
 
-/* ---------- Canvas-Layer (eine einzige Render-Fläche) ---------- */
-const MorphLayer=L.Layer.extend({
-  initialize(){this.canvas=document.createElement('canvas');
-    this.canvas.className='leaflet-image-layer leaflet-zoom-animated morphcanvas';
-    this._bounds=null},
-  onAdd(m){this._map=m;m.getPanes().overlayPane.appendChild(this.canvas);
-    m.on('zoom viewreset',this._reset,this);
-    m.on('zoomanim',this._anim,this);
-    this._reset()},
-  onRemove(m){m.getPanes().overlayPane.removeChild(this.canvas);
-    m.off('zoom viewreset',this._reset,this);
-    m.off('zoomanim',this._anim,this)},
-  setBounds(b){this._bounds=L.latLngBounds(b);if(this._map)this._reset()},
-  _reset(){
-    if(!this._bounds)return;
-    const tl=this._map.latLngToLayerPoint(this._bounds.getNorthWest());
-    const br=this._map.latLngToLayerPoint(this._bounds.getSouthEast());
-    L.DomUtil.setPosition(this.canvas,tl);
-    this.canvas.style.width=(br.x-tl.x)+'px';
-    this.canvas.style.height=(br.y-tl.y)+'px';
+/* ---------- Vektor-Isolinien-Engine (SVG) ----------
+   Feld glätten → Marching Squares pro Klassenschwelle → gefüllte
+   Vektorpfade. Glatte Kurven statt Pixeltreppen, beliebig scharf
+   bei jedem Zoom, kein Canvas-Readback (= kein GC-Ruckeln). */
+const SVGNS='http://www.w3.org/2000/svg';
+
+const IsoLayer=L.Layer.extend({
+  initialize(){
+    this.svg=document.createElementNS(SVGNS,'svg');
+    this.svg.setAttribute('class','leaflet-zoom-animated');
+    this.svg.style.cssText='position:absolute;left:0;top:0;pointer-events:none;will-change:transform;overflow:visible';
+    this.g=document.createElementNS(SVGNS,'g');
+    this.svg.appendChild(this.g);
+    this._paths=[];   /* ein <path> je Klasse 1..7 */
+    for(let l=1;l<=7;l++){
+      const p=document.createElementNS(SVGNS,'path');
+      const c=CLASS_RGBA[l];
+      p.setAttribute('fill','rgb('+c[0]+','+c[1]+','+c[2]+')');
+      p.setAttribute('fill-opacity',(c[3]/255*0.82).toFixed(3));
+      p.setAttribute('fill-rule','evenodd');
+      p.setAttribute('stroke','none');
+      this.g.appendChild(p);
+      this._paths[l]=p;
+    }
+  },
+  onAdd(m){this._map=m;m.getPanes().overlayPane.appendChild(this.svg);
+    m.on('zoomanim',this._anim,this);m.on('moveend zoomend viewreset',this._place,this);this._place()},
+  onRemove(m){this.svg.remove();
+    m.off('zoomanim',this._anim,this);m.off('moveend zoomend viewreset',this._place,this)},
+  /* Geo-Bezugsrahmen des Master-Rasters (ganz AT) */
+  _place(){
+    if(!this._map)return;
+    const tl=this._map.latLngToLayerPoint([AT.n,AT.w]);
+    const br=this._map.latLngToLayerPoint([AT.s,AT.e]);
+    L.DomUtil.setPosition(this.svg,tl);
+    const w=br.x-tl.x, h=br.y-tl.y;
+    this.svg.setAttribute('width',w);
+    this.svg.setAttribute('height',h);
+    this.svg.setAttribute('viewBox','0 0 '+M.gW+' '+M.gH);
+    this._w=w;this._h=h;
   },
   _anim(e){
-    if(!this._bounds)return;
-    const off=this._map._latLngBoundsToNewLayerBounds(this._bounds,e.zoom,e.center).min;
-    L.DomUtil.setTransform(this.canvas,off,this._map.getZoomScale(e.zoom));
+    const tl=this._map._latLngToNewLayerPoint([AT.n,AT.w],e.zoom,e.center);
+    const br=this._map._latLngToNewLayerPoint([AT.s,AT.e],e.zoom,e.center);
+    L.DomUtil.setPosition(this.svg,tl);
+    this.svg.setAttribute('width',br.x-tl.x);
+    this.svg.setAttribute('height',br.y-tl.y);
+  },
+  setPaths(dList){
+    for(let l=1;l<=7;l++)this._paths[l].setAttribute('d',dList[l]||'');
   }
 });
-const morphLayer=new MorphLayer();
+const isoLayer=new IsoLayer();
 
-/* ---------- WebGL-Quantizer ----------
-   Die 2D-Variante (getImageData pro Bild) erzeugte >20 MB/s
-   Speichermüll → periodische GC-Ruckler ("springt alle paar
-   Minuten"). Der Shader macht Bilinear-Upscale + Klassen-Lookup
-   komplett auf der GPU: kein Readback, kein Müll, 60 fps. */
-const GLQ=null;
-const _GLQ_unused=(function(){
-  try{
-    return null; // WebGL deaktiviert (verursachte Sub-Pixel-Flackern)
-    const cv=morphLayer.canvas;
-    const gl=cv.getContext('webgl',{premultipliedAlpha:true,alpha:true,antialias:false});
-    if(!gl)return null;
-    const sh=(t,src)=>{const x=gl.createShader(t);gl.shaderSource(x,src);gl.compileShader(x);
-      if(!gl.getShaderParameter(x,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(x));return x};
-    const pr=gl.createProgram();
-    gl.attachShader(pr,sh(gl.VERTEX_SHADER,
-      'attribute vec2 p;varying vec2 uv;void main(){uv=p;gl_Position=vec4(p*2.0-1.0,0.0,1.0);}'));
-    gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,
-      'precision mediump float;varying vec2 uv;uniform sampler2D t;uniform vec4 pal[8];'+
-      'void main(){float g=texture2D(t,uv).r*255.0;float lf=floor(g/32.0+0.5);'+
-      'if(lf<1.0){gl_FragColor=vec4(0.0);return;}'+
-      'int l=int(min(lf,7.0));vec4 c=pal[1];'+
-      'if(l==2)c=pal[2];else if(l==3)c=pal[3];else if(l==4)c=pal[4];'+
-      'else if(l==5)c=pal[5];else if(l==6)c=pal[6];else if(l==7)c=pal[7];'+
-      'gl_FragColor=vec4(c.rgb*c.a,c.a);}'));
-    gl.linkProgram(pr);
-    if(!gl.getProgramParameter(pr,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(pr));
-    gl.useProgram(pr);
-    const buf=gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER,buf);
-    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([0,0,1,0,0,1,1,1]),gl.STATIC_DRAW);
-    const loc=gl.getAttribLocation(pr,'p');
-    gl.enableVertexAttribArray(loc);
-    gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
-    const pal=new Float32Array(32);
-    for(let l=1;l<8;l++){const c=CLASS_RGBA[l];
-      pal[l*4]=c[0]/255;pal[l*4+1]=c[1]/255;pal[l*4+2]=c[2]/255;pal[l*4+3]=c[3]/255}
-    gl.uniform4fv(gl.getUniformLocation(pr,'pal'),pal);
-    const tex=gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D,tex);
-    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
-    gl.disable(gl.BLEND);
-    gl.clearColor(0,0,0,0);
-    return{draw(src){
-      gl.viewport(0,0,morphLayer.canvas.width,morphLayer.canvas.height);
-      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,src);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
-    }};
-  }catch(e){console.warn('WebGL nicht verfügbar, 2D-Fallback:',e);return null}
-})();
-
-/* ---------- Viewport: geglättete Graustufen-Frames bauen ---------- */
-const V={cnvs:null,gw:0,gh:0,W:0,H:0,tmp:document.createElement('canvas'),octx:null,imgData:null};
-function makeFieldCanvas(grid,gx0,gy0,gw,gh){
-  const n=gw*gh;
-  const a=new Float32Array(n), b=new Float32Array(n);
-  for(let y=0;y<gh;y++)for(let x=0;x<gw;x++)
-    a[y*gw+x]=grid[(gy0+y)*M.gW+(gx0+x)];
-  for(let y=0;y<gh;y++)for(let x=0;x<gw;x++){
-    const i=y*gw+x;
-    if(a[i]>0){b[i]=a[i];continue}
-    let m=0;
-    if(x>0&&a[i-1]>m)m=a[i-1];
-    if(x<gw-1&&a[i+1]>m)m=a[i+1];
-    if(y>0&&a[i-gw]>m)m=a[i-gw];
-    if(y<gh-1&&a[i+gw]>m)m=a[i+gw];
-    b[i]=m*0.6;
+/* ---- Marching Squares: Schwelle thr auf Feld f (gw×gh) → SVG-Pfad ----
+   Liefert gefüllte Kontur aller Zellen mit Wert >= thr. Lineare
+   Interpolation der Kantenschnitte → glatte, sub-zellgenaue Linien. */
+function isoPath(f,gw,gh,thr){
+  let d='';
+  const at=(x,y)=>f[y*gw+x];
+  /* Zellgitter (gw-1)×(gh-1); pro Zelle Standard-MS-Cases als Liniensegmente,
+     hier als gefüllte Fläche über Konturzug. Wir sammeln Segmente und
+     verbinden sie grob — für Füllung reicht even-odd mit Zellpolygonen. */
+  /* Performanter Ansatz: pro Zelle, die >=thr ist, ein Quadrat; Kanten
+     zu Nachbarn <thr werden interpoliert eingezogen → glatte Ränder. */
+  const t=thr;
+  for(let y=0;y<gh-1;y++){
+    for(let x=0;x<gw-1;x++){
+      const v00=at(x,y),v10=at(x+1,y),v01=at(x,y+1),v11=at(x+1,y+1);
+      let idx=0;
+      if(v00>=t)idx|=1; if(v10>=t)idx|=2; if(v11>=t)idx|=4; if(v01>=t)idx|=8;
+      if(idx===0)continue;
+      const ix=(a,b)=>{const d0=t-a,d1=b-a;return d1===0?0.5:Math.max(0,Math.min(1,d0/d1))};
+      const T={x:x+ix(v00,v10),y:y}, R={x:x+1,y:y+ix(v10,v11)},
+            B={x:x+ix(v01,v11),y:y+1}, Lp={x:x,y:y+ix(v00,v01)};
+      const P=[];
+      // Eckpunkte + interpolierte Kantenpunkte je nach Case zum gefüllten Polygon
+      const c00={x,y},c10={x:x+1,y},c11={x:x+1,y:y+1},c01={x,y:y+1};
+      switch(idx){
+        case 1:P.push(c00,T,Lp);break;
+        case 2:P.push(T,c10,R);break;
+        case 4:P.push(R,c11,B);break;
+        case 8:P.push(Lp,B,c01);break;
+        case 3:P.push(c00,c10,R,Lp);break;
+        case 6:P.push(T,c10,c11,B);break;
+        case 12:P.push(Lp,R,c11,c01);break;
+        case 9:P.push(c00,T,B,c01);break;
+        case 5:P.push(c00,T,R,c11,B,Lp);break;
+        case 10:P.push(T,c10,R,B,c01,Lp);break;
+        case 7:P.push(c00,c10,c11,B,Lp);break;
+        case 11:P.push(c00,c10,R,B,c01);break;
+        case 13:P.push(c00,T,R,c11,c01);break;
+        case 14:P.push(T,c10,c11,c01,Lp);break;
+        case 15:P.push(c00,c10,c11,c01);break;
+      }
+      if(P.length){
+        d+='M'+P[0].x.toFixed(2)+' '+P[0].y.toFixed(2);
+        for(let k=1;k<P.length;k++)d+='L'+P[k].x.toFixed(2)+' '+P[k].y.toFixed(2);
+        d+='Z';
+      }
+    }
   }
-  for(let i=0;i<n;i++)a[i]=(b[Math.max(0,i-1)]+2*b[i]+b[Math.min(n-1,i+1)])*0.25;
-  for(let i=0;i<n;i++)b[i]=(a[Math.max(0,i-gw)]+2*a[i]+a[Math.min(n-1,i+gw)])*0.25;
-  const c=document.createElement('canvas');c.width=gw;c.height=gh;
-  const ctx=c.getContext('2d');
-  const im=ctx.createImageData(gw,gh);
-  for(let i=0;i<n;i++){im.data[i*4]=Math.min(255,b[i]*32);im.data[i*4+3]=255}
-  ctx.putImageData(im,0,0);
-  return c;
+  return d;
 }
 
-let frames=[],pos=0,playing=true,holdUntil=0,lastT=0;
-let source=null,renderedRect=null,renderToken=0;
-const frameMs=()=>frames.length>14?620:850;
+/* Viewport-unabhängig: wir glätten/morphen IMMER das volle AT-Feld in
+   reduzierter Auflösung (schnell), Konturen sind dann scharf durch Vektor. */
+const F={gw:0,gh:0,fields:null,tmpA:null,tmpB:null,mix:null};
+function buildSmoothFields(){
+  /* Master grob auf ~halbe Auflösung mitteln für Tempo, dann glätten */
+  const D=2;
+  const gw=Math.floor(M.gW/D), gh=Math.floor(M.gH/D);
+  F.gw=gw;F.gh=gh;
+  F.fields=M.grids.map(g=>{
+    const n=gw*gh, a=new Float32Array(n), b=new Float32Array(n);
+    for(let y=0;y<gh;y++)for(let x=0;x<gw;x++){
+      let mx=0;
+      for(let dy=0;dy<D;dy++)for(let dx=0;dx<D;dx++){
+        const v=g[(y*D+dy)*M.gW+(x*D+dx)];if(v>mx)mx=v;
+      }
+      a[y*gw+x]=mx;
+    }
+    /* zwei Glättungspässe → runde Konturen */
+    for(let p=0;p<2;p++){
+      for(let i=0;i<n;i++)b[i]=(a[Math.max(0,i-1)]+2*a[i]+a[Math.min(n-1,i+1)])*0.25;
+      for(let i=0;i<n;i++)a[i]=(b[Math.max(0,i-gw)]+2*b[i]+b[Math.min(n-1,i+gw)])*0.25;
+    }
+    return a;
+  });
+  F.mix=new Float32Array(gw*gh);
+}
+
+const LEVEL_THR=[0,0.5,1.5,2.5,3.5,4.5,5.5,6.5];  /* Schwellen zwischen Klassen */
+let pos=0,playing=true,holdUntil=0,lastT=0;
+let source=null;
 const nowIdx=()=>{let k=0;frames.forEach((f,j)=>{if(!f.future)k=j});return k};
+let frames=[];
+
+function drawMorph(p){
+  if(!F.fields||!F.fields.length)return;
+  const nn=F.fields.length;
+  const i=Math.max(0,Math.min(nn-1,Math.floor(p))), f=Math.max(0,Math.min(1,p-i));
+  const A=F.fields[i], B=F.fields[Math.min(i+1,nn-1)], mix=F.mix;
+  const gw=F.gw,gh=F.gh;
+  const m=(M.motion[Math.min(i,M.motion.length-1)])||{kx:0,ky:0};
+  const adv=!REDUCED;
+  /* advektierte Verschiebung in (halben) Master-Pixeln */
+  const ax=adv?(f*m.kx/2):0, ay=adv?(f*m.ky/2):0;
+  const bx=adv?(-(1-f)*m.kx/2):0, by=adv?(-(1-f)*m.ky/2):0;
+  const sample=(fld,x,y)=>{
+    const xi=Math.round(x),yi=Math.round(y);
+    if(xi<0||yi<0||xi>=gw||yi>=gh)return 0;
+    return fld[yi*gw+xi];
+  };
+  for(let y=0;y<gh;y++)for(let x=0;x<gw;x++){
+    const va=sample(A,x-ax,y-ay), vb=sample(B,x-bx,y-by);
+    mix[y*gw+x]=va*(1-f)+vb*f;
+  }
+  const dList=[];
+  for(let l=1;l<=7;l++)dList[l]=isoPath(mix,gw,gh,LEVEL_THR[l]);
+  /* viewBox des SVG ist Master-Auflösung → Faktor D ausgleichen */
+  isoLayer.svg.setAttribute('viewBox','0 0 '+gw+' '+gh);
+  isoLayer.setPaths(dList);
+}
 
 async function renderView(showProgress){
   if(source!=='inca'||!M.grids.length)return;
-  const token=++renderToken;
-  const b=map.getBounds(),padY=(b.getNorth()-b.getSouth())*0.3,padX=(b.getEast()-b.getWest())*0.3;
-  const s=Math.max(AT.s,b.getSouth()-padY), n=Math.min(AT.n,b.getNorth()+padY);
-  const w=Math.max(AT.w,b.getWest()-padX), e=Math.min(AT.e,b.getEast()+padX);
-  const gx0=Math.max(0,Math.floor((w-AT.w)/(AT.e-AT.w)*M.gW));
-  const gy0=Math.max(0,Math.floor((AT.n-n)/(AT.n-AT.s)*M.gH));
-  const gx1=Math.min(M.gW,Math.ceil((e-AT.w)/(AT.e-AT.w)*M.gW));
-  const gy1=Math.min(M.gH,Math.ceil((AT.n-s)/(AT.n-AT.s)*M.gH));
-  const gw=Math.max(8,gx1-gx0),gh=Math.max(8,gy1-gy0);
-  const S=Math.min(10,Math.max(2,Math.floor(700/Math.max(gw,gh))));
-  const bw=AT.w+gx0/M.gW*(AT.e-AT.w), be=AT.w+(gx0+gw)/M.gW*(AT.e-AT.w);
-  const bn=AT.n-gy0/M.gH*(AT.n-AT.s), bs=AT.n-(gy0+gh)/M.gH*(AT.n-AT.s);
-
-  const cnvs=[];
-  for(let j=0;j<frames.length;j++){
-    if(token!==renderToken)return;
-    cnvs[j]=makeFieldCanvas(M.grids[j],gx0,gy0,gw,gh);
-    if(showProgress)progTick('Rendere Radar …');
-    if(j%4===3)await raf();
-  }
-  if(token!==renderToken)return;
-  V.cnvs=cnvs;V.gw=gw;V.gh=gh;V.W=gw*S;V.H=gh*S;
-  V.geo={gx0,gy0,gw,gh,S};
-  V.tmp.width=gw;V.tmp.height=gh;
-  morphLayer.canvas.width=V.W;morphLayer.canvas.height=V.H;
-  V.octx=morphLayer.canvas.getContext('2d');
-  V.octx.imageSmoothingEnabled=true;V.octx.imageSmoothingQuality='high';
-  V.imgData=V.octx.createImageData(V.W,V.H);
-  morphLayer.setBounds([[bs,bw],[bn,be]]);
-  if(!morphLayer._map)morphLayer.addTo(map);
-  renderedRect={gx0,gy0,gx1:gx0+gw,gy1:gy0+gh};
-  drawMorph(pos,true);
-}
-
-/* ---------- DER Morph: Feld interpolieren, EINMAL quantisieren ---------- */
-let fadeSnap=null;
-function drawMorph(p,force){
-  if(!V.cnvs||!V.cnvs.length)return;
-  /* Gleichmäßigkeit schlägt Rate: bei teurem Frame stabil JEDEN
-     zweiten Takt zeichnen statt unregelmäßig zu drosseln */
-  const nn=V.cnvs.length;
-  const i=Math.max(0,Math.min(nn-1,Math.floor(p))), f=Math.max(0,Math.min(1,p-i));
-  const t=V.tmp.getContext('2d');
-  t.globalCompositeOperation='source-over';
-  t.globalAlpha=1;
-  t.fillStyle='#000';t.fillRect(0,0,V.gw,V.gh);
-  t.globalCompositeOperation='lighter';
-  t.imageSmoothingEnabled=true;
-  const m=(M.motion[Math.min(i,M.motion.length-1)])||{kx:0,ky:0};
-  const adv=!REDUCED;
-  let w=0;                       /* Gewicht des alten Datenstands */
-  if(fadeSnap){
-    w=(fadeSnap.until-performance.now())/800;
-    if(w<=0){fadeSnap=null;w=0}
-  }
-  t.globalAlpha=(1-f)*(1-w);
-  t.drawImage(V.cnvs[i],adv?f*m.kx:0,adv?f*m.ky:0);
-  if(f>0.001&&i+1<nn){
-    t.globalAlpha=f*(1-w);
-    t.drawImage(V.cnvs[i+1],adv?-(1-f)*m.kx:0,adv?-(1-f)*m.ky:0);
-  }
-  if(w>0&&fadeSnap){
-    t.globalAlpha=w;
-    t.drawImage(fadeSnap.cnv,0,0);
-    requestAnimationFrame(()=>drawMorph(pos,true));  /* auch pausiert weiterblenden */
-  }
-  t.globalAlpha=1;
-  const o=V.octx||morphLayer.canvas.getContext('2d');
-  o.clearRect(0,0,V.W,V.H);
-  o.drawImage(V.tmp,0,0,V.W,V.H);
-  /* Graustufen-Lesepuffer einmalig, danach wiederverwendet → kein GC-Müll */
-  const src=o.getImageData(0,0,V.W,V.H).data;
-  const u32=new Uint32Array(V.imgData.data.buffer);
-  for(let k=0,K=V.W*V.H;k<K;k++)u32[k]=LUT[src[k*4]];
-  o.putImageData(V.imgData,0,0);
+  buildSmoothFields();
+  if(!isoLayer._map)isoLayer.addTo(map);
+  isoLayer._place();
+  if(showProgress){for(let k=0;k<MAX_FUTURE;k++)progTick('Bereite Darstellung …')}
+  drawMorph(pos);
 }
 
 /* ---------- Anzeige / Engine ---------- */
-let visA=-1,visB=-1;   /* nur für RainViewer-Fallback */
 function applyPos(){
   const n=frames.length;if(!n)return;
   pos=Math.max(0,Math.min(n-1,pos));
@@ -601,11 +578,9 @@ function applyPos(){
     drawMorph(pos);
   }else{
     const LA=0.78;
-    if(visA!==-1&&visA!==i&&visA!==i+1&&frames[visA]&&frames[visA].overlay)frames[visA].overlay.setOpacity(0);
-    if(visB!==-1&&visB!==i&&visB!==i+1&&frames[visB]&&frames[visB].overlay)frames[visB].overlay.setOpacity(0);
-    if(frames[i].overlay)frames[i].overlay.setOpacity((1-f)*LA);
+    if(frames[i].overlay)frames[i].overlay.setOpacity(1-f<0?0:(1-f)*LA);
     if(i+1<n&&frames[i+1].overlay)frames[i+1].overlay.setOpacity(f*LA);
-    visA=i;visB=i+1<n?i+1:-1;
+    for(let j=0;j<n;j++)if(j!==i&&j!==i+1&&frames[j].overlay)frames[j].overlay.setOpacity(0);
   }
   const tA=frames[i].time,tB=frames[Math.min(i+1,n-1)].time;
   const t=tA+(tB-tA)*f;
@@ -643,29 +618,14 @@ function commitRefresh(atWrap){
   if(!atWrap&&frames.length){
     const i=Math.floor(pos),f=pos-i;
     tDisp=frames[i].time+(frames[Math.min(i+1,frames.length-1)].time-frames[i].time)*f;
-    /* aktuelles Feld als Schnappschuss → weiche Ablöse statt Hard-Cut */
-    if(V.cnvs){
-      drawMorph(pos,true);
-      const sn=document.createElement('canvas');sn.width=V.gw;sn.height=V.gh;
-      sn.getContext('2d').drawImage(V.tmp,0,0);
-      fadeSnap={cnv:sn,until:performance.now()+800};
-    }
   }
   M.times=pr.times;M.grids=pr.grids;M.motion=pr.motion;
   const NOW=Date.now()+60000;
   frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
   buildTimeline();
   if(tDisp!=null)pos=posForTime(tDisp);
-  const sameGeo=pr.cnvs&&pr.geo&&V.geo&&
-    pr.geo.gx0===V.geo.gx0&&pr.geo.gy0===V.geo.gy0&&
-    pr.geo.gw===V.geo.gw&&pr.geo.gh===V.geo.gh&&pr.geo.S===V.geo.S;
-  if(sameGeo){
-    V.cnvs=pr.cnvs;
-    if(!atWrap)drawMorph(pos,true);   /* am Schleifenende zeichnet der nächste Takt Frame 0 */
-  }else{
-    renderedRect=null;
-    renderView(false);
-  }
+  buildSmoothFields();
+  drawMorph(pos);
 }
 const SEG_MS=900;          /* feste Dauer pro 15-min-Frame */
 function loop(t){
@@ -695,8 +655,8 @@ $('jumpNow').addEventListener('click',()=>{pos=nowIdx();applyPos()});
 
 function clearFrames(){
   frames.forEach(f=>f.overlay&&map.removeLayer(f.overlay));
-  frames=[];visA=visB=-1;V.cnvs=null;
-  if(morphLayer._map)map.removeLayer(morphLayer);
+  frames=[];F.fields=null;
+  if(isoLayer._map)map.removeLayer(isoLayer);
 }
 
 /* ---------- Timeline-Band ---------- */
@@ -809,22 +769,7 @@ $('locate').addEventListener('click',async()=>{
 });
 
 /* ---------- Neu rendern bei Pan/Zoom (lokal) ---------- */
-let moveT=null,lastZoom=map.getZoom();
-map.on('moveend',()=>{
-  if(source!=='inca'||!renderedRect)return;
-  const z=map.getZoom();
-  const b=map.getBounds();
-  const gx0=Math.floor((b.getWest()-AT.w)/(AT.e-AT.w)*M.gW);
-  const gx1=Math.ceil((b.getEast()-AT.w)/(AT.e-AT.w)*M.gW);
-  const gy0=Math.floor((AT.n-b.getNorth())/(AT.n-AT.s)*M.gH);
-  const gy1=Math.ceil((AT.n-b.getSouth())/(AT.n-AT.s)*M.gH);
-  const out=gx0<renderedRect.gx0||gx1>renderedRect.gx1||gy0<renderedRect.gy0||gy1>renderedRect.gy1;
-  const zoomed=Math.abs(z-lastZoom)>=1;
-  if(!out&&!zoomed)return;
-  lastZoom=z;
-  clearTimeout(moveT);
-  moveT=setTimeout(()=>renderView(false),450);
-});
+/* Pan/Zoom: SVG-Isolinien skalieren automatisch mit, kein Re-Render nötig */
 
 /* ---------- Boot ---------- */
 (async()=>{
@@ -851,15 +796,7 @@ map.on('moveend',()=>{
     try{
       const d=await preloadAustria(false);
       const motion=d.motion;
-      let cnvs=null;const geo=V.geo;
-      if(geo){
-        cnvs=[];
-        for(let j=0;j<d.times.length;j++){
-          cnvs[j]=makeFieldCanvas(d.grids[j],geo.gx0,geo.gy0,geo.gw,geo.gh);
-          if(j%4===3)await raf();
-        }
-      }
-      pendingRefresh={times:d.times,grids:d.grids,motion,cnvs,geo};
+      pendingRefresh={times:d.times,grids:d.grids,motion};
       if(!playing)commitRefresh();   /* pausiert → sofort übernehmen */
     }catch(e){}
   },600000);
