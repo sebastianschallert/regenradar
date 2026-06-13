@@ -121,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v5.6</div>
+  <div class="sub">GeoSphere Austria · INCA · v5.7</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -421,7 +421,19 @@ const IsoLayer=L.Layer.extend({
     this.svg=document.createElementNS(SVGNS,'svg');
     this.svg.setAttribute('class','leaflet-zoom-animated');
     this.svg.style.cssText='position:absolute;left:0;top:0;pointer-events:none;will-change:transform;overflow:visible';
+    const defs=document.createElementNS(SVGNS,'defs');
+    const filt=document.createElementNS(SVGNS,'filter');
+    filt.setAttribute('id','rrSoft');
+    filt.setAttribute('x','-10%');filt.setAttribute('y','-10%');
+    filt.setAttribute('width','120%');filt.setAttribute('height','120%');
+    const blur=document.createElementNS(SVGNS,'feGaussianBlur');
+    blur.setAttribute('in','SourceGraphic');
+    blur.setAttribute('stdDeviation','0.9');   /* in Rasterzellen → ~1 km */
+    filt.appendChild(blur);
+    defs.appendChild(filt);
+    this.svg.appendChild(defs);
     this.g=document.createElementNS(SVGNS,'g');
+    this.g.setAttribute('filter','url(#rrSoft)');
     this.svg.appendChild(this.g);
     this._paths=[];   /* ein <path> je Klasse 1..7 */
     for(let l=1;l<=7;l++){
@@ -430,12 +442,9 @@ const IsoLayer=L.Layer.extend({
       const col='rgb('+c[0]+','+c[1]+','+c[2]+')';
       p.setAttribute('fill',col);
       p.setAttribute('fill-opacity',(c[3]/255*0.82).toFixed(3));
-      p.setAttribute('fill-rule','evenodd');
-      p.setAttribute('stroke',col);
-      p.setAttribute('stroke-opacity',(c[3]/255*0.82).toFixed(3));
-      p.setAttribute('stroke-width','0.6');
-      p.setAttribute('stroke-linejoin','round');
-      p.setAttribute('vector-effect','non-scaling-stroke');
+      p.setAttribute('fill-rule','nonzero');
+      p.setAttribute('stroke','none');
+      p.setAttribute('shape-rendering','geometricPrecision');
       this.g.appendChild(p);
       this._paths[l]=p;
     }
