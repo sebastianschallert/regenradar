@@ -121,7 +121,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v5.2</div>
+  <div class="sub">GeoSphere Austria · INCA · v5.3</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -553,7 +553,7 @@ function drawMorph(p,force){
   if(!F.fields||!F.fields.length)return;
   /* Konturen nur neu berechnen, wenn sich Position spürbar geändert hat
      (Pfad-Neuberechnung ist das Teure, nicht die Anzeige) */
-  if(!force&&Math.abs(p-_lastDrawP)<0.012)return;
+  if(!force&&Math.abs(p-_lastDrawP)<0.0015)return;
   const _t0=performance.now();
   _lastDrawP=p;
   const nn=F.fields.length;
@@ -566,9 +566,13 @@ function drawMorph(p,force){
   const ax=adv?(f*m.kx/2):0, ay=adv?(f*m.ky/2):0;
   const bx=adv?(-(1-f)*m.kx/2):0, by=adv?(-(1-f)*m.ky/2):0;
   const sample=(fld,x,y)=>{
-    const xi=Math.round(x),yi=Math.round(y);
-    if(xi<0||yi<0||xi>=gw||yi>=gh)return 0;
-    return fld[yi*gw+xi];
+    const x0=Math.floor(x),y0=Math.floor(y);
+    const fx=x-x0,fy=y-y0;
+    const x1=x0+1,y1=y0+1;
+    if(x1<0||y1<0||x0>=gw||y0>=gh)return 0;
+    const g=(xx,yy)=>(xx<0||yy<0||xx>=gw||yy>=gh)?0:fld[yy*gw+xx];
+    const a=g(x0,y0),b=g(x1,y0),c=g(x0,y1),d=g(x1,y1);
+    return a*(1-fx)*(1-fy)+b*fx*(1-fy)+c*(1-fx)*fy+d*fx*fy;
   };
   let mx0=0,my0=0,mx1=gw,my1=gh;
   if(map&&map.getBounds){
@@ -667,7 +671,7 @@ function commitRefresh(atWrap){
   buildSmoothFields();
   drawMorph(pos);
 }
-const SEG_MS=900;          /* feste Dauer pro 15-min-Frame */
+const SEG_MS=1100;         /* feste Dauer pro 15-min-Frame */
 function loop(t){
   requestAnimationFrame(loop);
   if(!frames.length){lastT=t;return}
