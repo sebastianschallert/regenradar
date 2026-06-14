@@ -49,7 +49,8 @@
   .live.off .dot{background:var(--gray)}
   .live.off .dot::after{display:none}
   .locbtn{background:var(--card);border:1px solid var(--hair);color:var(--ink);
-    width:40px;height:40px;border-radius:4px;display:grid;place-items:center;cursor:pointer;font-size:17px}
+    width:40px;height:40px;border-radius:50%;display:grid;place-items:center;
+    font-size:17px;cursor:pointer;pointer-events:auto;box-shadow:0 1px 3px rgba(0,0,0,.06);flex:0 0 auto}
   .locbtn:active{transform:scale(.94)}
   .locbtn:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
 
@@ -184,7 +185,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.24</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.25</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -192,13 +193,12 @@
 
 <div class="hdr">
   <div class="right">
-    <button class="locbtn" id="locate" title="Mein Standort" aria-label="Mein Standort">◎</button>
     <button class="placebtn" id="placeBtn" aria-label="Ort wählen">
       <span class="pin-ic">◍</span><span id="placeLabel">Wien</span><span class="chev">⌄</span>
     </button>
+    <button class="locbtn" id="locate" title="Mein Standort" aria-label="Mein Standort"><span style="display:inline-block;transform:rotate(-45deg)">➤</span></button>
   </div>
-  <!-- versteckter Live-Status (für Code-Kompatibilität, unsichtbar) -->
-  <div id="liveBadge" class="live off" hidden><span id="srcTxt">VERBINDE</span></div>
+  <div id="liveBadge" style="display:none!important"><span id="srcTxt"></span></div>
 </div>
 
 <!-- Ort-Such-Overlay -->
@@ -288,9 +288,13 @@ function writeStripe(timeMap,gj,limit){
   }
 }
 async function fetchGrid(url){
-  const res=await fetch(url);
-  if(!res.ok)throw new Error('HTTP '+res.status);
-  return res.json();
+  const ctl=new AbortController();
+  const to=setTimeout(()=>ctl.abort(),18000);   /* 18s pro Abruf, dann abbrechen */
+  try{
+    const res=await fetch(url,{signal:ctl.signal});
+    if(!res.ok)throw new Error('HTTP '+res.status);
+    return await res.json();
+  }finally{clearTimeout(to)}
 }
 /* AROME-Grid: rr_acc ist akkumuliert seit Forecast-Start.
    Schritt 1: stuendliche Differenz = Regen je Stunde (mm/h).
@@ -1169,7 +1173,7 @@ $('placeInput').addEventListener('input',e=>{
 async function geoSearch(q){
   try{
     const url='https://geocoding-api.open-meteo.com/v1/search?name='+
-      encodeURIComponent(q)+'&count=6&language=de&format=json';
+      encodeURIComponent(q)+'&count=8&language=de&format=json&countryCode=AT';
     const r=await fetch(url);if(!r.ok)return;
     const j=await r.json();
     const res=$('placeResults');
