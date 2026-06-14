@@ -87,6 +87,26 @@ async function run(){
     return (j.results||[]).length+' Treffer';
   });
 
+  // 6) WIE DIE APP: 6 Streifen, 3 parallel (das ist der echte Lade-Vorgang)
+  await timed('APP-SIMULATION: 6 Streifen, 3 parallel',async()=>{
+    const stripes=[];
+    for(let i=0;i<6;i++){
+      const w=AT.w+(AT.e-AT.w)*i/6, ee=AT.w+(AT.e-AT.w)*(i+1)/6;
+      stripes.push(AT.s+','+w.toFixed(3)+','+AT.n+','+ee.toFixed(3));
+    }
+    let done=0;
+    const tasks=stripes.map(bb=>async()=>{
+      const j=await fetchT(GS+'/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox='+bb+'&output_format=geojson',30000);
+      done++;log('   Streifen '+done+'/6 fertig','info');
+      return (j.features||[]).length;
+    });
+    // pool mit 3 parallel
+    let i=0;const results=[];
+    async function wfn(){while(i<tasks.length){const j=i++;results[j]=await tasks[j]().catch(e=>'ERR:'+e.message)}}
+    await Promise.all([wfn(),wfn(),wfn()]);
+    return 'alle 6: '+results.join(',');
+  });
+
   log('— FERTIG —','info');
 }
 </script></body></html>
