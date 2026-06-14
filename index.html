@@ -146,7 +146,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.22</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.23</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -373,24 +373,33 @@ self.onmessage=async e=>{
     const ncOk=res.slice(0,STRIPES).some(r=>r===true);
     if(!ncOk)throw new Error('Prognose nicht ladbar');
 
-    /* AROME dahinter anhängen (stündlich, bis ~60h) */
+    /* --- INCA SOFORT senden (App ist sofort live, ohne auf AROME zu warten) --- */
     const ncTimes=[...timeMap.keys()].sort((a,b)=>a-b);
     const ncEnd=ncTimes.length?ncTimes[ncTimes.length-1]:Date.now();
+    {
+      const grids=ncTimes.map(t=>timeMap.get(t));
+      const motion=smoothMotion(computeMotion(grids));
+      /* Kopien senden (Originale bleiben im Worker für den AROME-Merge) */
+      const copies=grids.map(g=>g.slice().buffer);
+      self.postMessage({type:'done',times:ncTimes,grids:copies,motion,ncEndTime:ncEnd},copies);
+    }
+
+    /* --- AROME im Hintergrund nachladen und separat nachschicken --- */
     const aTasks=stripes.map(bb=>async()=>{
       try{
         const gj=await fetchGrid(GS+'/grid/forecast/nwp-v1-1h-2500m?parameters=rr_acc&bbox='+bb+'&output_format=geojson');
-        writeStripeArome(timeMap,gj,ncEnd+1);   /* nur Zeiten nach NC-Ende */
-        self.postMessage({type:'prog',label:'Lade Tagesvorhersage …'});
+        writeStripeArome(timeMap,gj,ncEnd+1);
         return true;
       }catch(_){return false}
     });
     await pool(aTasks,3);
-
-    const times=[...timeMap.keys()].sort((a,b)=>a-b);
-    const grids=times.map(t=>timeMap.get(t));
-    const motion=smoothMotion(computeMotion(grids));
-    const bufs=grids.map(g=>g.buffer);
-    self.postMessage({type:'done',times,grids:bufs,motion,ncEndTime:ncEnd},bufs);
+    const allTimes=[...timeMap.keys()].sort((a,b)=>a-b);
+    if(allTimes.length>ncTimes.length){
+      const grids=allTimes.map(t=>timeMap.get(t));
+      const motion=smoothMotion(computeMotion(grids));
+      const bufs=grids.map(g=>g.buffer);
+      self.postMessage({type:'arome',times:allTimes,grids:bufs,motion,ncEndTime:ncEnd},bufs);
+    }
   }catch(err){
     self.postMessage({type:'err',msg:String((err&&err.message)||err)});
   }
@@ -502,6 +511,18 @@ const M={gW:0,gH:0,times:[],grids:[],motion:[],ncEnd:0};
    Web Worker, das UI bekommt nur fertige Typed Arrays. */
 const worker=new Worker(URL.createObjectURL(
   new Blob([document.getElementById('wsrc').textContent],{type:'text/javascript'})));
+
+/* AROME kommt nach dem INCA-"done" separat nach → eigener dauerhafter Listener.
+   Hängt die Vorhersage-Frames an, ohne den laufenden Film zu unterbrechen. */
+worker.addEventListener('message',e=>{
+  const d=e.data;
+  if(d.type!=='arome')return;
+  if(source!=='inca')return;
+  const times=d.times, grids=d.grids.map(b=>new Uint8Array(b));
+  pendingRefresh={times,grids,motion:d.motion,ncEndTime:d.ncEndTime};
+  if(!playing)commitRefresh();   /* pausiert → sofort; sonst am Schleifenende */
+});
+
 function preloadAustria(showSplash){
   if(showSplash)progInit(STRIPES*8+MAX_FUTURE+6,'Verbinde mit GeoSphere …');
   return new Promise((resolve,reject)=>{
@@ -1116,7 +1137,7 @@ map.on('moveend zoomend',()=>{
   try{
     const d0=await Promise.race([
       preloadAustria(true),
-      new Promise((_,rej)=>setTimeout(()=>rej(new Error('Timeout: GeoSphere antwortet nicht')),25000))
+      new Promise((_,rej)=>setTimeout(()=>rej(new Error('Timeout: GeoSphere antwortet nicht')),40000))
     ]);
     M.times=d0.times;M.grids=d0.grids;M.motion=d0.motion;M.ncEnd=d0.ncEndTime||0;
     const NOW=Date.now()+60000;
