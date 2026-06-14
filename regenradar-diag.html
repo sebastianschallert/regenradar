@@ -107,6 +107,22 @@ async function run(){
     return 'alle 6: '+results.join(',');
   });
 
+  // 7) 6 Streifen SEQUENZIELL (1 nach dem anderen) — Test ob das zuverlässig ist
+  await timed('6 Streifen SEQUENZIELL',async()=>{
+    const stripes=[];
+    for(let i=0;i<6;i++){
+      const w=AT.w+(AT.e-AT.w)*i/6, ee=AT.w+(AT.e-AT.w)*(i+1)/6;
+      stripes.push(AT.s+','+w.toFixed(3)+','+AT.n+','+ee.toFixed(3));
+    }
+    let total=0;
+    for(let i=0;i<stripes.length;i++){
+      const j=await fetchT(GS+'/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox='+stripes[i]+'&output_format=geojson',30000);
+      total+=(j.features||[]).length;
+      log('   seq Streifen '+(i+1)+'/6 ok','info');
+    }
+    return total+' Punkte gesamt';
+  });
+
   log('— FERTIG —','info');
 }
 </script></body></html>
