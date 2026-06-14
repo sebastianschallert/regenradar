@@ -180,6 +180,9 @@
     font-size:13px;font-weight:500;color:var(--ink);cursor:pointer}
   .ps-fav .x{color:var(--gray);font-size:11px;margin-left:2px}
   .ps-fav:active{background:var(--hair2)}
+
+  .nc .mchip{cursor:pointer;transition:border-color .15s,background .15s}
+  .nc .mchip.active{border-color:var(--ink);background:var(--ink);color:var(--paper)!important;font-weight:600}
 </style>
 </head>
 <body>
@@ -187,7 +190,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.34</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.35</div>
   <div class="pct" id="pct" style="display:none"></div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -234,7 +237,7 @@
     <div class="ncmetrics">
       <span class="met" id="metTemp"><span class="v" id="ncT">–</span><span class="u">°</span></span>
       <span class="ncmsep">·</span>
-      <span class="met" id="metRain"><span class="v" id="ncMM">0.0</span><span class="u">mm/h</span></span>
+      <span class="met" id="metRain"><span class="v" id="ncMM">0.0</span><span class="u" id="ncMMU">mm/h</span></span>
       <span class="ncmsep">·</span>
       <span class="met" id="metWind"><span class="v" id="ncW">–</span><span class="u">km/h</span><span class="u" id="ncWdir"></span></span>
     </div>
@@ -1037,6 +1040,7 @@ async function loadFocusSeries(){
 /* ---------- Modellvergleich via Open-Meteo (ICON, ECMWF, AROME) ----------
    Drei unabhängige Modelle für den Fokuspunkt. Pro Stunde zählen wir, wie
    viele "Regen" (>=0.1 mm/h) sagen → Einigkeits-Ampel. */
+let activeModel=null;   /* null=GeoSphere/INCA; sonst "ICON"/"ECMWF"/"GFS" — schaltet Box-Werte um */
 const OM_MODELS=[
   {id:'icon_seamless',name:'ICON'},      /* DWD, Mitteleuropa */
   {id:'ecmwf_ifs025',name:'ECMWF'},      /* europäische Referenz */
@@ -1076,14 +1080,14 @@ function updateAgreement(){
     have++;
     const wet=gsv>=0.1;
     if(wet)rain++;
-    chips.push('<span class="mchip '+(wet?'wet':'dry')+'">'+(wet?'🌧':'☀')+' GeoSphere</span>');
+    chips.push('<span class="mchip '+(wet?'wet':'dry')+(activeModel===null?' active':'')+'" data-model="">'+(wet?'🌧':'☀')+' GeoSphere</span>');
   }
   if(M&&idx>=0)M.series.forEach((s,mi)=>{
     if(!s||s[idx]==null)return;
     have++;
     const wet=s[idx]>=0.1;
     if(wet)rain++;
-    chips.push('<span class="mchip '+(wet?'wet':'dry')+'">'+
+    chips.push('<span class="mchip '+(wet?'wet':'dry')+(activeModel===M.names[mi]?' active':'')+'" data-model="'+M.names[mi]+'">'+
       (wet?'🌧':'☀')+' '+M.names[mi]+'</span>');
   });
   if(!have){row.classList.remove('show');return}
@@ -1095,6 +1099,17 @@ function updateAgreement(){
   else{row.classList.add('mid');head='<b>'+rain+'/'+have+'</b> Regen';}
   $('agreeTxt').innerHTML=head+' &nbsp;'+chips.join(' ');
 }
+/* Modell-Chip-Klick: Box/Prognose auf dieses Modell umschalten (einmalig gebunden) */
+(function bindModelChips(){
+  const host=$('agreeTxt');if(!host)return;
+  host.addEventListener('click',e=>{
+    const chip=e.target.closest('.mchip[data-model]');if(!chip)return;
+    const m=chip.getAttribute('data-model');
+    activeModel=(m==='')?null:m;       /* leer = zurück zu GeoSphere */
+    updateAgreement();                 /* aktiven Chip neu markieren */
+    updateFocusBox();                  /* Box auf neues Modell */
+  });
+})();
 /* generische Zeitreihen-Interpolation */
 function seriesAt(arr,tMs){
   const T=focus.times;if(!T.length||!arr)return null;
@@ -1108,8 +1123,25 @@ function seriesAt(arr,tMs){
   }
   return arr[arr.length-1];
 }
-/* mm/h-Wert zur Anzeige-Zeit (nutzt dieselbe null-tolerante Interpolation) */
-function focusValueAt(tMs){return seriesAt(focus.vals,tMs);}
+/* mm/h-Wert zur Anzeige-Zeit. Bei aktivem Alternativmodell (ICON/ECMWF/GFS)
+   dessen Open-Meteo-Serie, sonst GeoSphere (focus.vals). */
+function focusValueAt(tMs){
+  if(activeModel&&focus.models){
+    const mi=focus.models.names.indexOf(activeModel);
+    if(mi>=0){
+      const s=focus.models.series[mi];
+      if(s){
+        /* nächsten Stundenindex zu tMs finden */
+        let idx=-1,best=1e15;
+        for(let k=0;k<focus.models.times.length;k++){
+          const d=Math.abs(focus.models.times[k]-tMs);if(d<best){best=d;idx=k}}
+        if(idx>=0&&best<=2*3600000&&s[idx]!=null)return s[idx];
+        return null;
+      }
+    }
+  }
+  return seriesAt(focus.vals,tMs);
+}
 function updateFocusBox(){
   if(!focus.times.length||!frames.length)return;
   const i=Math.floor(pos),f=pos-i;
@@ -1118,6 +1150,7 @@ function updateFocusBox(){
   const vRaw=focusValueAt(tNow);          /* bereits mm/h, null wenn außerhalb */
   const v=vRaw==null?0:vRaw;
   $('ncMM').textContent=vRaw==null?'–':(v<0.05?'0.0':(v<1?v.toFixed(1):v.toFixed(v<10?1:0)));
+  $('ncMMU').textContent=activeModel?('mm/h · '+activeModel):'mm/h';
   $('metRain').classList.toggle('rainon',v>=0.4);
   const tp=seriesAt(focus.temp,tNow);
   $('ncT').textContent=tp==null?'–':Math.round(tp);
