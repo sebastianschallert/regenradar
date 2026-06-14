@@ -187,7 +187,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.33</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.34</div>
   <div class="pct" id="pct" style="display:none"></div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -1211,24 +1211,84 @@ $('placeInput').addEventListener('input',e=>{
   if(q.length<1){$('placeResults').innerHTML='';return}
   geoTimer=setTimeout(()=>geoSearch(q),160);
 });
+
+/* Größte österreichische Orte — für Instant-Vorschläge ab 1 Buchstabe,
+   bevor/zusätzlich zur Geocoding-API. lat,lon,Bundesland. */
+const AT_CITIES=[
+  ['Wien',48.2082,16.3738,'Wien'],
+  ['Graz',47.0707,15.4395,'Steiermark'],
+  ['Linz',48.3069,14.2858,'Oberösterreich'],
+  ['Salzburg',47.8095,13.0550,'Salzburg'],
+  ['Innsbruck',47.2692,11.4041,'Tirol'],
+  ['Klagenfurt',46.6247,14.3055,'Kärnten'],
+  ['Villach',46.6111,13.8558,'Kärnten'],
+  ['Wels',48.1575,14.0289,'Oberösterreich'],
+  ['Sankt Pölten',48.2047,15.6256,'Niederösterreich'],
+  ['Dornbirn',47.4125,9.7417,'Vorarlberg'],
+  ['Wiener Neustadt',47.8149,16.2422,'Niederösterreich'],
+  ['Steyr',48.0420,14.4210,'Oberösterreich'],
+  ['Feldkirch',47.2380,9.5990,'Vorarlberg'],
+  ['Bregenz',47.5031,9.7471,'Vorarlberg'],
+  ['Leonding',48.2667,14.2500,'Oberösterreich'],
+  ['Klosterneuburg',48.3050,16.3253,'Niederösterreich'],
+  ['Baden',48.0059,16.2336,'Niederösterreich'],
+  ['Wolfsberg',46.8408,14.8447,'Kärnten'],
+  ['Leoben',47.3829,15.0961,'Steiermark'],
+  ['Krems',48.4099,15.6140,'Niederösterreich'],
+  ['Traun',48.2206,14.2386,'Oberösterreich'],
+  ['Amstetten',48.1228,14.8719,'Niederösterreich'],
+  ['Kapfenberg',47.4447,15.2939,'Steiermark'],
+  ['Mödling',48.0858,16.2897,'Niederösterreich'],
+  ['Hallein',47.6833,13.0967,'Salzburg'],
+  ['Kufstein',47.5828,12.1697,'Tirol'],
+  ['Traiskirchen',48.0142,16.2933,'Niederösterreich'],
+  ['Schwechat',48.1417,16.4789,'Niederösterreich'],
+  ['Braunau am Inn',48.2585,13.0350,'Oberösterreich'],
+  ['Stockerau',48.3833,16.2167,'Niederösterreich'],
+  ['Bludenz',47.1547,9.8222,'Vorarlberg'],
+  ['Saalbach',47.3920,12.6390,'Salzburg'],
+  ['Zell am See',47.3236,12.7950,'Salzburg'],
+  ['Spittal an der Drau',46.7958,13.4944,'Kärnten'],
+  ['Tulln',48.3306,16.0589,'Niederösterreich'],
+  ['Hohenems',47.3667,9.6833,'Vorarlberg'],
+  ['Lustenau',47.4267,9.6581,'Vorarlberg'],
+  ['Eisenstadt',47.8456,16.5267,'Burgenland'],
+  ['Gmunden',47.9181,13.7994,'Oberösterreich'],
+  ['Wörgl',47.4869,12.0628,'Tirol'],
+  ['Hard',47.4869,9.6889,'Vorarlberg'],
+  ['Telfs',47.3069,11.0708,'Tirol'],
+  ['Schwaz',47.3458,11.7089,'Tirol'],
+  ['Hallein',47.6833,13.0967,'Salzburg']
+];
+function renderPlaceList(items){
+  const res=$('placeResults');
+  if(!items.length){res.innerHTML='<div class="ps-row"><span class="rg">Kein österreichischer Ort</span></div>';return}
+  res.innerHTML=items.slice(0,8).map(p=>
+    '<div class="ps-row" data-lat="'+p.lat+'" data-lon="'+p.lon+'" data-nm="'+esc(p.name)+'">'+
+    '<span class="nm">'+esc(p.name)+'</span><span class="rg">'+esc(p.region)+'</span></div>').join('');
+}
 async function geoSearch(q){
+  const ql=q.toLowerCase();
+  /* 1) SOFORT: große AT-Städte aus der eingebauten Liste (instant, ab 1 Buchstabe) */
+  const local=AT_CITIES
+    .filter(c=>c[0].toLowerCase().startsWith(ql))
+    .map(c=>({name:c[0],lat:c[1],lon:c[2],region:c[3]}));
+  if(local.length)renderPlaceList(local);   /* gleich anzeigen */
+
+  /* 2) DANN: Geocoding-API für alle übrigen Orte, an die Liste anhängen */
   try{
-    /* count=100: Open-Meteo sortiert AT-Orte oft schlecht ein → viele holen,
-       dann hart auf Österreich filtern und nach Einwohnerzahl sortieren. */
     const url='https://geocoding-api.open-meteo.com/v1/search?name='+
       encodeURIComponent(q)+'&count=100&language=de&format=json';
-    const r=await fetch(url);if(!r.ok)return;
+    const r=await fetch(url);if(!r.ok){if(!local.length)renderPlaceList([]);return}
     const j=await r.json();
-    const res=$('placeResults');
-    let list=(j.results||[]).filter(p=>p.country_code==='AT');
-    list.sort((a,b)=>(b.population||0)-(a.population||0));   /* große Orte zuerst */
-    if(!list.length){res.innerHTML='<div class="ps-row"><span class="rg">Kein österreichischer Ort</span></div>';return}
-    res.innerHTML=list.slice(0,8).map(p=>{
-      const region=p.admin1||'Österreich';
-      return '<div class="ps-row" data-lat="'+p.latitude+'" data-lon="'+p.longitude+'" data-nm="'+esc(p.name)+'">'+
-        '<span class="nm">'+esc(p.name)+'</span><span class="rg">'+esc(region)+'</span></div>';
-    }).join('');
-  }catch(_){}
+    let api=(j.results||[]).filter(p=>p.country_code==='AT')
+      .sort((a,b)=>(b.population||0)-(a.population||0))
+      .map(p=>({name:p.name,lat:p.latitude,lon:p.longitude,region:p.admin1||'Österreich'}));
+    /* Liste + API mergen, Dubletten (gleicher Name) raus */
+    const seen=new Set(local.map(c=>c.name.toLowerCase()));
+    const merged=local.concat(api.filter(p=>!seen.has(p.name.toLowerCase())));
+    renderPlaceList(merged);
+  }catch(_){if(!local.length)renderPlaceList([])}
 }
 /* Klicks im Overlay (Event-Delegation) */
 $('placeResults').addEventListener('click',e=>{
