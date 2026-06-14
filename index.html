@@ -185,7 +185,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.25</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.26</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -223,10 +223,10 @@
     <button class="playbtn" id="play" aria-label="Pause">⏸</button>
     <div class="timeinfo">
       <div class="t" id="time">––:––</div>
-      <div class="rel" id="rel">Daten laden</div>
+      <div class="rel" id="rel" style="display:none!important">Daten laden</div>
     </div>
     <button class="nowbtn" id="jumpNow" aria-label="Zu Jetzt springen">JETZT</button>
-    <div class="badge" id="badge">INCA</div>
+    <div class="badge" id="badge" style="display:none!important">INCA</div>
   </div>
   <div class="nc" id="ncTxt">
     <div class="ncmetrics">
@@ -762,7 +762,11 @@ function applyPos(){
   }
   const tA=frames[i].time,tB=frames[Math.min(i+1,n-1)].time;
   const t=tA+(tB-tA)*f;
-  $('time').textContent=fmt(t);
+  /* Tag voranstellen, wenn nicht heute (z.B. "Sa 14:30") */
+  const dNow=new Date(), dT=new Date(t);
+  const sameDay=dNow.toDateString()===dT.toDateString();
+  const wd=dT.toLocaleDateString('de-AT',{weekday:'short'}).replace('.','');
+  $('time').textContent=(sameDay?'':wd+' ')+fmt(t);
   const diff=Math.round((t-Date.now())/60000);
   const fut=frames[Math.round(pos)].future;
   const rel=$('rel'),badge=$('badge');
@@ -1167,8 +1171,8 @@ let geoTimer=null;
 $('placeInput').addEventListener('input',e=>{
   const q=e.target.value.trim();
   clearTimeout(geoTimer);
-  if(q.length<2){$('placeResults').innerHTML='';return}
-  geoTimer=setTimeout(()=>geoSearch(q),280);
+  if(q.length<1){$('placeResults').innerHTML='';return}
+  geoTimer=setTimeout(()=>geoSearch(q),160);
 });
 async function geoSearch(q){
   try{
