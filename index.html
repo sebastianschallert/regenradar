@@ -90,6 +90,11 @@
   .nc .agree.mid .agreedot{background:#E8A23D}       /* gelb: teils */
   .nc .agree.low .agreedot{background:var(--signal)} /* rot: uneinig */
   .nc .agree b{color:var(--ink);font-weight:600}
+  .nc .agree{flex-wrap:wrap}
+  .mchip{display:inline-flex;align-items:center;gap:2px;font-size:10.5px;font-weight:500;
+    padding:1px 5px;border-radius:100px;border:1px solid var(--hair2);color:var(--gray)}
+  .mchip.wet{color:#2671c4;border-color:rgba(38,113,196,.3)}
+  .mchip.dry{color:#9a8030;border-color:rgba(154,128,48,.25)}
 
   .tl{margin-top:14px}
   .track{position:relative;height:54px;touch-action:none;cursor:grab;overflow:hidden;
@@ -138,7 +143,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.17</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.18</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -931,26 +936,42 @@ async function loadFocusSeries(){
    Drei unabhängige Modelle für den Fokuspunkt. Pro Stunde zählen wir, wie
    viele "Regen" (>=0.1 mm/h) sagen → Einigkeits-Ampel. */
 const OM_MODELS=[
-  {id:'arome_seamless',name:'GeoSphere'},/* GeoSphere AROME (= Kartenmodell) */
-  {id:'icon_seamless',name:'ICON'},      /* DWD, top für Mitteleuropa */
+  {id:'arome_seamless',name:'GeoSphere',ep:'geosphere'},/* eigener Endpoint */
+  {id:'icon_seamless',name:'ICON'},      /* DWD, Mitteleuropa */
   {id:'ecmwf_ifs025',name:'ECMWF'},      /* europäische Referenz */
-  {id:'gfs_seamless',name:'GFS'}         /* NOAA, unabhängige Stimme */
+  {id:'gfs_seamless',name:'GFS'}         /* NOAA */
 ];
 async function loadModelCompare(){
   try{
     const ll='latitude='+focus.lat.toFixed(4)+'&longitude='+focus.lon.toFixed(4);
-    const models=OM_MODELS.map(m=>m.id).join(',');
-    const url='https://api.open-meteo.com/v1/forecast?'+ll+
-      '&hourly=precipitation&models='+models+'&forecast_days=3&timezone=UTC';
-    const r=await fetch(url);if(!r.ok)return;
-    const j=await r.json();
-    const h=j.hourly;if(!h||!h.time)return;
-    const times=h.time.map(t=>Date.parse(t+'Z'));
-    /* pro Modell die precipitation-Spalte (Open-Meteo hängt _modelid an) */
+    const epModels=OM_MODELS.filter(m=>!m.ep);                /* via /v1/forecast */
+    const geoModels=OM_MODELS.filter(m=>m.ep==='geosphere');  /* eigener Endpoint */
+    const reqs=[];
+    /* Sammel-Request für ICON/ECMWF/GFS */
+    if(epModels.length){
+      reqs.push(fetch('https://api.open-meteo.com/v1/forecast?'+ll+
+        '&hourly=precipitation&models='+epModels.map(m=>m.id).join(',')+
+        '&forecast_days=3&timezone=UTC').then(r=>r.ok?r.json():null).catch(()=>null));
+    }else reqs.push(Promise.resolve(null));
+    /* GeoSphere über eigenen Endpoint (ohne models-Param) */
+    if(geoModels.length){
+      reqs.push(fetch('https://api.open-meteo.com/v1/geosphere?'+ll+
+        '&hourly=precipitation&forecast_days=3&timezone=UTC')
+        .then(r=>r.ok?r.json():null).catch(()=>null));
+    }else reqs.push(Promise.resolve(null));
+    const [jEp,jGeo]=await Promise.all(reqs);
+
+    /* gemeinsame Zeitachse aus dem ersten verfügbaren Ergebnis */
+    const baseH=(jEp&&jEp.hourly)||(jGeo&&jGeo.hourly);
+    if(!baseH||!baseH.time)return;
+    const times=baseH.time.map(t=>Date.parse(t+'Z'));
     const series=OM_MODELS.map(m=>{
-      /* exakte Spalte precipitation_<id>; nur falls vorhanden */
-      const key='precipitation_'+m.id;
-      return h[key]||null;
+      if(m.ep==='geosphere'){
+        const h=jGeo&&jGeo.hourly;
+        return h?(h['precipitation_'+m.id]||h.precipitation||null):null;
+      }
+      const h=jEp&&jEp.hourly;
+      return h?(h['precipitation_'+m.id]||null):null;
     });
     focus.models={times,series,names:OM_MODELS.map(m=>m.name)};
     updateAgreement();
@@ -967,22 +988,23 @@ function updateAgreement(){
   for(let k=0;k<M.times.length;k++){const d=Math.abs(M.times[k]-tNow);if(d<best){best=d;idx=k}}
   if(idx<0||best>2*3600000){row.classList.remove('show');return}
   let rain=0,have=0;
-  const detail=[];
+  const chips=[];
   M.series.forEach((s,mi)=>{
     if(!s||s[idx]==null)return;
     have++;
     const wet=s[idx]>=0.1;
     if(wet)rain++;
-    detail.push(M.names[mi]+(wet?'✓':'✗'));
+    chips.push('<span class="mchip '+(wet?'wet':'dry')+'">'+
+      (wet?'🌧':'☀')+' '+M.names[mi]+'</span>');
   });
   if(!have){row.classList.remove('show');return}
   row.classList.add('show');
   row.classList.remove('high','mid','low');
-  let txt;
-  if(rain===0){row.classList.add('high');txt='<b>'+have+'/'+have+' Modelle einig:</b> trocken';}
-  else if(rain===have){row.classList.add('high');txt='<b>'+have+'/'+have+' Modelle einig:</b> Regen';}
-  else{row.classList.add('mid');txt='<b>'+rain+'/'+have+' Modelle:</b> Regen ('+detail.join(' ')+')';}
-  $('agreeTxt').innerHTML=txt;
+  let head;
+  if(rain===0){row.classList.add('high');head='<b>'+have+'/'+have+'</b> trocken';}
+  else if(rain===have){row.classList.add('high');head='<b>'+have+'/'+have+'</b> Regen';}
+  else{row.classList.add('mid');head='<b>'+rain+'/'+have+'</b> Regen';}
+  $('agreeTxt').innerHTML=head+' &nbsp;'+chips.join(' ');
 }
 /* generische Zeitreihen-Interpolation */
 function seriesAt(arr,tMs){
