@@ -185,7 +185,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.28</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.30</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -393,7 +393,7 @@ function smoothMotion(mo){
 }
 self.onmessage=async e=>{
   if(e.data.cmd!=='load')return;
-  const focusLL=e.data.focus||{lat:48.21,lon:16.37};   /* Standort fürs Schnellbild */
+  const focusLL=e.data.focus||{lat:48.21,lon:16.37};
   try{
     const timeMap=new Map();
     const stripes=[];
@@ -402,8 +402,8 @@ self.onmessage=async e=>{
       stripes.push(AT.s+','+w.toFixed(3)+','+AT.n+','+ee.toFixed(3));
     }
 
-    /* ===== STUFE 1: kleiner Ausschnitt um den Standort (±0.6° ≈ 65km, ~2s) =====
-       Liefert sofort ein nutzbares lokales Radar, bevor ganz AT geladen wird. */
+    /* ===== STUFE 1: EIN lokaler Abruf (±0.6°≈65km, ~3s, immer zuverlässig) =====
+       Sofort ein nutzbares Radar, Splash weg, bevor ganz AT lädt. */
     const r=0.6;
     const localBB=Math.max(AT.s,focusLL.lat-r)+','+Math.max(AT.w,focusLL.lon-r)+','+
                   Math.min(AT.n,focusLL.lat+r)+','+Math.min(AT.e,focusLL.lon+r);
@@ -414,21 +414,24 @@ self.onmessage=async e=>{
       if(lt.length){
         const lg=lt.map(t=>timeMap.get(t));
         const lm=smoothMotion(computeMotion(lg));
-        const lc=lg.map(g=>g.slice().buffer);   /* Kopie senden, Original bleibt */
+        const lc=lg.map(g=>g.slice().buffer);
         self.postMessage({type:'done',times:lt,grids:lc,motion:lm,ncEndTime:lt[lt.length-1],partial:true},lc);
       }
     }catch(_){}
 
-    /* ===== STUFE 2: ganz Österreich nachladen (im Hintergrund) ===== */
+    /* ===== STUFE 2: ganz Österreich parallel nachladen (Hintergrund) =====
+       Scheitern ist hier unkritisch — lokales Bild ist schon da. */
     const end=new Date(),start=new Date(Date.now()-PASTMIN*60000);
     const tasks=[];
     for(const bb of stripes)tasks.push(async()=>{
-      const gj=await fetchGrid(GS+'/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox='+bb+'&output_format=geojson');
-      writeStripe(timeMap,gj,MAXF);
-      self.postMessage({type:'prog',label:'Lade ganz Österreich …'});
-      return true;
+      try{
+        const gj=await fetchGrid(GS+'/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox='+bb+'&output_format=geojson');
+        writeStripe(timeMap,gj,MAXF);
+        self.postMessage({type:'prog',label:'Lade ganz Österreich …'});
+        return true;
+      }catch(_){return false}
     });
-    const res=await pool(tasks,3);
+    const res=await pool(tasks,2);
     const ncOk=res.slice(0,STRIPES).some(r=>r===true);
     if(!ncOk)throw new Error('Prognose nicht ladbar');
 
@@ -445,7 +448,7 @@ self.onmessage=async e=>{
       }catch(_){return false}
     });
     await Promise.race([
-      pool(aTasks,3),
+      pool(aTasks,1),
       new Promise(r=>setTimeout(r,12000))   /* AROME max 12s, dann weiter */
     ]);
 
@@ -555,13 +558,11 @@ const M={gW:0,gH:0,times:[],grids:[],motion:[],ncEnd:0};
 const worker=new Worker(URL.createObjectURL(
   new Blob([document.getElementById('wsrc').textContent],{type:'text/javascript'})));
 
-/* Hintergrund-Listener: das KOMPLETTE Österreich-Bild (2. done) kommt nach
-   dem schnellen lokalen Bild und wird still übernommen, ohne den Film zu stören. */
+/* komplettes AT-Bild (2. done, ohne partial) still im Hintergrund übernehmen */
 worker.addEventListener('message',e=>{
   const d=e.data;
-  if(d.type!=='done')return;
-  if(d.partial)return;            /* partielles Schnellbild behandelt preloadAustria */
-  if(source!=='inca')return;      /* komplettes AT-Bild still nachrüsten */
+  if(d.type!=='done'||d.partial)return;
+  if(source!=='inca')return;
   pendingRefresh={times:d.times,grids:d.grids.map(b=>new Uint8Array(b)),
     motion:d.motion,ncEndTime:d.ncEndTime};
   if(!playing)commitRefresh();
@@ -573,19 +574,15 @@ function preloadAustria(showSplash){
     const onMsg=e=>{
       const d=e.data;
       if(d.type==='prog'){if(showSplash)progTick(d.label,8)}
-      else if(d.type==='done'){
-        /* erstes done (partial = lokales Schnellbild) beendet den Splash;
-           das komplette done danach übernimmt der Hintergrund-Listener */
+      else if(d.type==='done'){            /* erstes done = lokales Schnellbild */
         worker.removeEventListener('message',onMsg);
-        resolve({times:d.times,grids:d.grids.map(b=>new Uint8Array(b)),
-          motion:d.motion,ncEndTime:d.ncEndTime});
+        resolve({times:d.times,grids:d.grids.map(b=>new Uint8Array(b)),motion:d.motion,ncEndTime:d.ncEndTime});
       }else if(d.type==='err'){
         worker.removeEventListener('message',onMsg);
         reject(new Error(d.msg));
       }
     };
     worker.addEventListener('message',onMsg);
-    /* aktuellen Fokus (GPS oder Wien) an den Worker fürs Schnellbild */
     worker.postMessage({cmd:'load',focus:{lat:focus.lat,lon:focus.lon}});
   });
 }
