@@ -143,7 +143,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.18</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.19</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -936,7 +936,6 @@ async function loadFocusSeries(){
    Drei unabhängige Modelle für den Fokuspunkt. Pro Stunde zählen wir, wie
    viele "Regen" (>=0.1 mm/h) sagen → Einigkeits-Ampel. */
 const OM_MODELS=[
-  {id:'arome_seamless',name:'GeoSphere',ep:'geosphere'},/* eigener Endpoint */
   {id:'icon_seamless',name:'ICON'},      /* DWD, Mitteleuropa */
   {id:'ecmwf_ifs025',name:'ECMWF'},      /* europäische Referenz */
   {id:'gfs_seamless',name:'GFS'}         /* NOAA */
@@ -944,52 +943,40 @@ const OM_MODELS=[
 async function loadModelCompare(){
   try{
     const ll='latitude='+focus.lat.toFixed(4)+'&longitude='+focus.lon.toFixed(4);
-    const epModels=OM_MODELS.filter(m=>!m.ep);                /* via /v1/forecast */
-    const geoModels=OM_MODELS.filter(m=>m.ep==='geosphere');  /* eigener Endpoint */
-    const reqs=[];
-    /* Sammel-Request für ICON/ECMWF/GFS */
-    if(epModels.length){
-      reqs.push(fetch('https://api.open-meteo.com/v1/forecast?'+ll+
-        '&hourly=precipitation&models='+epModels.map(m=>m.id).join(',')+
-        '&forecast_days=3&timezone=UTC').then(r=>r.ok?r.json():null).catch(()=>null));
-    }else reqs.push(Promise.resolve(null));
-    /* GeoSphere über eigenen Endpoint (ohne models-Param) */
-    if(geoModels.length){
-      reqs.push(fetch('https://api.open-meteo.com/v1/geosphere?'+ll+
-        '&hourly=precipitation&forecast_days=3&timezone=UTC')
-        .then(r=>r.ok?r.json():null).catch(()=>null));
-    }else reqs.push(Promise.resolve(null));
-    const [jEp,jGeo]=await Promise.all(reqs);
-
-    /* gemeinsame Zeitachse aus dem ersten verfügbaren Ergebnis */
-    const baseH=(jEp&&jEp.hourly)||(jGeo&&jGeo.hourly);
-    if(!baseH||!baseH.time)return;
-    const times=baseH.time.map(t=>Date.parse(t+'Z'));
-    const series=OM_MODELS.map(m=>{
-      if(m.ep==='geosphere'){
-        const h=jGeo&&jGeo.hourly;
-        return h?(h['precipitation_'+m.id]||h.precipitation||null):null;
-      }
-      const h=jEp&&jEp.hourly;
-      return h?(h['precipitation_'+m.id]||null):null;
-    });
+    const url='https://api.open-meteo.com/v1/forecast?'+ll+
+      '&hourly=precipitation&models='+OM_MODELS.map(m=>m.id).join(',')+
+      '&forecast_days=3&timezone=UTC';
+    const r=await fetch(url);if(!r.ok)return;
+    const j=await r.json();
+    const h=j.hourly;if(!h||!h.time)return;
+    const times=h.time.map(t=>Date.parse(t+'Z'));
+    const series=OM_MODELS.map(m=>h['precipitation_'+m.id]||null);
     focus.models={times,series,names:OM_MODELS.map(m=>m.name)};
     updateAgreement();
   }catch(e){}
 }
 function updateAgreement(){
   const M=focus.models, row=$('agreeRow');
-  if(!M||!frames.length){return}
+  if(!frames.length){return}
   const i=Math.floor(pos),f=pos-i;
   const tA=frames[i].time,tB=frames[Math.min(i+1,frames.length-1)].time;
   const tNow=tA+(tB-tA)*f;
-  /* nächsten Stunden-Index im Modellraster finden */
+  /* Index im Open-Meteo-Raster (falls vorhanden) */
   let idx=-1,best=1e15;
-  for(let k=0;k<M.times.length;k++){const d=Math.abs(M.times[k]-tNow);if(d<best){best=d;idx=k}}
-  if(idx<0||best>2*3600000){row.classList.remove('show');return}
+  if(M){for(let k=0;k<M.times.length;k++){const d=Math.abs(M.times[k]-tNow);if(d<best){best=d;idx=k}}}
+  if(M&&(idx<0||best>2*3600000))idx=-1;
   let rain=0,have=0;
   const chips=[];
-  M.series.forEach((s,mi)=>{
+  /* GeoSphere als 1. Stimme — echter Wert aus der bereits geladenen
+     Standort-Zeitreihe (mm/h), nicht über Open-Meteo */
+  const gsv=seriesAt(focus.vals,tNow);
+  if(gsv!=null){
+    have++;
+    const wet=gsv>=0.1;
+    if(wet)rain++;
+    chips.push('<span class="mchip '+(wet?'wet':'dry')+'">'+(wet?'🌧':'☀')+' GeoSphere</span>');
+  }
+  if(M&&idx>=0)M.series.forEach((s,mi)=>{
     if(!s||s[idx]==null)return;
     have++;
     const wet=s[idx]>=0.1;
