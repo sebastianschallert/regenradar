@@ -185,7 +185,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.26</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.28</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -393,6 +393,7 @@ function smoothMotion(mo){
 }
 self.onmessage=async e=>{
   if(e.data.cmd!=='load')return;
+  const focusLL=e.data.focus||{lat:48.21,lon:16.37};   /* Standort fürs Schnellbild */
   try{
     const timeMap=new Map();
     const stripes=[];
@@ -400,31 +401,53 @@ self.onmessage=async e=>{
       const w=AT.w+(AT.e-AT.w)*i/STRIPES, ee=AT.w+(AT.e-AT.w)*(i+1)/STRIPES;
       stripes.push(AT.s+','+w.toFixed(3)+','+AT.n+','+ee.toFixed(3));
     }
+
+    /* ===== STUFE 1: kleiner Ausschnitt um den Standort (±0.6° ≈ 65km, ~2s) =====
+       Liefert sofort ein nutzbares lokales Radar, bevor ganz AT geladen wird. */
+    const r=0.6;
+    const localBB=Math.max(AT.s,focusLL.lat-r)+','+Math.max(AT.w,focusLL.lon-r)+','+
+                  Math.min(AT.n,focusLL.lat+r)+','+Math.min(AT.e,focusLL.lon+r);
+    try{
+      const gjL=await fetchGrid(GS+'/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox='+localBB+'&output_format=geojson');
+      writeStripe(timeMap,gjL,MAXF);
+      const lt=[...timeMap.keys()].sort((a,b)=>a-b);
+      if(lt.length){
+        const lg=lt.map(t=>timeMap.get(t));
+        const lm=smoothMotion(computeMotion(lg));
+        const lc=lg.map(g=>g.slice().buffer);   /* Kopie senden, Original bleibt */
+        self.postMessage({type:'done',times:lt,grids:lc,motion:lm,ncEndTime:lt[lt.length-1],partial:true},lc);
+      }
+    }catch(_){}
+
+    /* ===== STUFE 2: ganz Österreich nachladen (im Hintergrund) ===== */
     const end=new Date(),start=new Date(Date.now()-PASTMIN*60000);
     const tasks=[];
     for(const bb of stripes)tasks.push(async()=>{
       const gj=await fetchGrid(GS+'/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox='+bb+'&output_format=geojson');
       writeStripe(timeMap,gj,MAXF);
-      self.postMessage({type:'prog',label:'Lade Prognose …'});
+      self.postMessage({type:'prog',label:'Lade ganz Österreich …'});
       return true;
     });
-    /* Rückblick entfällt (Auth). Nowcast = Jetzt + ~3h fein. */
     const res=await pool(tasks,3);
     const ncOk=res.slice(0,STRIPES).some(r=>r===true);
     if(!ncOk)throw new Error('Prognose nicht ladbar');
 
-    /* AROME dahinter anhängen (stündlich, bis ~60h) */
+    /* AROME dahinter anhängen — darf den Start NICHT blockieren.
+       Gesamtes AROME-Laden gegen 12s-Limit; was nicht kommt, fehlt halt. */
     const ncTimes=[...timeMap.keys()].sort((a,b)=>a-b);
     const ncEnd=ncTimes.length?ncTimes[ncTimes.length-1]:Date.now();
     const aTasks=stripes.map(bb=>async()=>{
       try{
         const gj=await fetchGrid(GS+'/grid/forecast/nwp-v1-1h-2500m?parameters=rr_acc&bbox='+bb+'&output_format=geojson');
-        writeStripeArome(timeMap,gj,ncEnd+1);   /* nur Zeiten nach NC-Ende */
+        writeStripeArome(timeMap,gj,ncEnd+1);
         self.postMessage({type:'prog',label:'Lade Tagesvorhersage …'});
         return true;
       }catch(_){return false}
     });
-    await pool(aTasks,3);
+    await Promise.race([
+      pool(aTasks,3),
+      new Promise(r=>setTimeout(r,12000))   /* AROME max 12s, dann weiter */
+    ]);
 
     const times=[...timeMap.keys()].sort((a,b)=>a-b);
     const grids=times.map(t=>timeMap.get(t));
@@ -531,6 +554,19 @@ const M={gW:0,gH:0,times:[],grids:[],motion:[],ncEnd:0};
    Web Worker, das UI bekommt nur fertige Typed Arrays. */
 const worker=new Worker(URL.createObjectURL(
   new Blob([document.getElementById('wsrc').textContent],{type:'text/javascript'})));
+
+/* Hintergrund-Listener: das KOMPLETTE Österreich-Bild (2. done) kommt nach
+   dem schnellen lokalen Bild und wird still übernommen, ohne den Film zu stören. */
+worker.addEventListener('message',e=>{
+  const d=e.data;
+  if(d.type!=='done')return;
+  if(d.partial)return;            /* partielles Schnellbild behandelt preloadAustria */
+  if(source!=='inca')return;      /* komplettes AT-Bild still nachrüsten */
+  pendingRefresh={times:d.times,grids:d.grids.map(b=>new Uint8Array(b)),
+    motion:d.motion,ncEndTime:d.ncEndTime};
+  if(!playing)commitRefresh();
+});
+
 function preloadAustria(showSplash){
   if(showSplash)progInit(STRIPES*8+MAX_FUTURE+6,'Verbinde mit GeoSphere …');
   return new Promise((resolve,reject)=>{
@@ -538,15 +574,19 @@ function preloadAustria(showSplash){
       const d=e.data;
       if(d.type==='prog'){if(showSplash)progTick(d.label,8)}
       else if(d.type==='done'){
+        /* erstes done (partial = lokales Schnellbild) beendet den Splash;
+           das komplette done danach übernimmt der Hintergrund-Listener */
         worker.removeEventListener('message',onMsg);
-        resolve({times:d.times,grids:d.grids.map(b=>new Uint8Array(b)),motion:d.motion,ncEndTime:d.ncEndTime});
+        resolve({times:d.times,grids:d.grids.map(b=>new Uint8Array(b)),
+          motion:d.motion,ncEndTime:d.ncEndTime});
       }else if(d.type==='err'){
         worker.removeEventListener('message',onMsg);
         reject(new Error(d.msg));
       }
     };
     worker.addEventListener('message',onMsg);
-    worker.postMessage({cmd:'load'});
+    /* aktuellen Fokus (GPS oder Wien) an den Worker fürs Schnellbild */
+    worker.postMessage({cmd:'load',focus:{lat:focus.lat,lon:focus.lon}});
   });
 }
 
@@ -1218,7 +1258,10 @@ map.on('moveend zoomend',()=>{
 /* ---------- Boot ---------- */
 (async()=>{
   try{
-    const d0=await preloadAustria(true);
+    const d0=await Promise.race([
+      preloadAustria(true),
+      new Promise((_,rej)=>setTimeout(()=>rej(new Error('Boot-Timeout 30s')),30000))
+    ]);
     M.times=d0.times;M.grids=d0.grids;M.motion=d0.motion;M.ncEnd=d0.ncEndTime||0;
     const NOW=Date.now()+60000;
     frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
