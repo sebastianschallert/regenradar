@@ -1,0 +1,79 @@
+<!DOCTYPE html><html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Regenradar Diagnose</title>
+<style>
+body{font-family:-apple-system,Helvetica,sans-serif;margin:0;padding:16px;background:#111;color:#0f0;font-size:14px}
+h1{font-size:16px;color:#fff}
+.line{padding:6px 0;border-bottom:1px solid #333;white-space:pre-wrap;word-break:break-all}
+.ok{color:#0f0}.err{color:#f44}.wait{color:#fb0}.info{color:#8cf}
+button{background:#0a0;color:#fff;border:none;padding:12px 20px;font-size:15px;border-radius:8px;margin:10px 0}
+</style></head><body>
+<h1>🔍 Regenradar Diagnose</h1>
+<div id="log"></div>
+<button onclick="run()">Test starten</button>
+<script>
+const GS='https://dataset.api.hub.geosphere.at/v1';
+const AT={s:46.0,w:9.2,n:49.4,e:17.6};
+function log(msg,cls){const d=document.createElement('div');d.className='line '+(cls||'info');d.textContent=msg;document.getElementById('log').appendChild(d);}
+async function timed(name,fn){
+  const t0=performance.now();
+  log('⏳ '+name+' …','wait');
+  try{
+    const r=await fn();
+    const dt=Math.round(performance.now()-t0);
+    log('✅ '+name+' OK ('+dt+'ms) '+(r||''),'ok');
+    return true;
+  }catch(e){
+    const dt=Math.round(performance.now()-t0);
+    log('❌ '+name+' FEHLER ('+dt+'ms): '+e.message,'err');
+    return false;
+  }
+}
+async function fetchT(url,ms){
+  const ctl=new AbortController();
+  const to=setTimeout(()=>ctl.abort(),ms||20000);
+  try{const r=await fetch(url,{signal:ctl.signal});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const j=await r.json();return j;
+  }finally{clearTimeout(to)}
+}
+async function run(){
+  document.getElementById('log').innerHTML='';
+  log('Start: '+new Date().toLocaleTimeString(),'info');
+
+  // 1) Metadata (klein, schnell)
+  await timed('Metadata Nowcast',async()=>{
+    const j=await fetchT(GS+'/timeseries/forecast/nowcast-v1-15min-1km/metadata',10000);
+    return 'reftime: '+(j.last_forecast_reftime||'?');
+  });
+
+  // 2) EIN INCA-Grid-Streifen (so wie die App)
+  const bb=AT.s+','+AT.w.toFixed(3)+','+AT.n+','+(AT.w+(AT.e-AT.w)/6).toFixed(3);
+  await timed('INCA Grid 1 Streifen',async()=>{
+    const j=await fetchT(GS+'/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox='+bb+'&output_format=geojson',25000);
+    const n=(j.features||[]).length;
+    return n+' Punkte, '+(j.timestamps||[]).length+' Zeitschritte';
+  });
+
+  // 3) EIN AROME-Grid-Streifen
+  await timed('AROME Grid 1 Streifen',async()=>{
+    const j=await fetchT(GS+'/grid/forecast/nwp-v1-1h-2500m?parameters=rr_acc&bbox='+bb+'&output_format=geojson',25000);
+    const n=(j.features||[]).length;
+    return n+' Punkte, '+(j.timestamps||[]).length+' Zeitschritte';
+  });
+
+  // 4) Open-Meteo Modellvergleich
+  await timed('Open-Meteo 3 Modelle',async()=>{
+    const j=await fetchT('https://api.open-meteo.com/v1/forecast?latitude=48.21&longitude=16.37&hourly=precipitation&models=icon_seamless,ecmwf_ifs025,gfs_seamless&forecast_days=1',15000);
+    return Object.keys(j.hourly||{}).length+' Spalten';
+  });
+
+  // 5) Geocoding
+  await timed('Geocoding Suche',async()=>{
+    const j=await fetchT('https://geocoding-api.open-meteo.com/v1/search?name=Wien&count=3&countryCode=AT',10000);
+    return (j.results||[]).length+' Treffer';
+  });
+
+  log('— FERTIG —','info');
+}
+</script></body></html>
