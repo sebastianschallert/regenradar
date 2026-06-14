@@ -47,12 +47,17 @@ async function run(){
     return 'reftime: '+(j.last_forecast_reftime||'?');
   });
 
-  // 2) EIN INCA-Grid-Streifen (so wie die App)
-  const bb=AT.s+','+AT.w.toFixed(3)+','+AT.n+','+(AT.w+(AT.e-AT.w)/6).toFixed(3);
-  await timed('INCA Grid 1 Streifen',async()=>{
-    const j=await fetchT(GS+'/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox='+bb+'&output_format=geojson',25000);
-    const n=(j.features||[]).length;
-    return n+' Punkte, '+(j.timestamps||[]).length+' Zeitschritte';
+  // 2a) EIN schmaler INCA-Streifen (1/6 von AT) — wie aktuelle App
+  const bb6=AT.s+','+AT.w.toFixed(3)+','+AT.n+','+(AT.w+(AT.e-AT.w)/6).toFixed(3);
+  await timed('INCA 1/6 Streifen (schmal)',async()=>{
+    const j=await fetchT(GS+'/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox='+bb6+'&output_format=geojson',25000);
+    return (j.features||[]).length+' Punkte';
+  });
+  // 2b) GANZ Österreich in EINEM Abruf
+  const bbAll=AT.s+','+AT.w+','+AT.n+','+AT.e;
+  await timed('INCA GANZ AT (1 Abruf)',async()=>{
+    const j=await fetchT(GS+'/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox='+bbAll+'&output_format=geojson',30000);
+    return (j.features||[]).length+' Punkte';
   });
 
   // 3) EIN AROME-Grid-Streifen
