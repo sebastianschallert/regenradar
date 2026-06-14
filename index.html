@@ -146,7 +146,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.20</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.22</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -248,9 +248,13 @@ function writeStripe(timeMap,gj,limit){
   }
 }
 async function fetchGrid(url){
-  const res=await fetch(url);
-  if(!res.ok)throw new Error('HTTP '+res.status);
-  return res.json();
+  const ctl=new AbortController();
+  const to=setTimeout(()=>ctl.abort(),15000);   /* 15s Timeout statt ewig hängen */
+  try{
+    const res=await fetch(url,{signal:ctl.signal});
+    if(!res.ok)throw new Error('HTTP '+res.status);
+    return await res.json();
+  }finally{clearTimeout(to)}
 }
 /* AROME-Grid: rr_acc ist akkumuliert seit Forecast-Start.
    Schritt 1: stuendliche Differenz = Regen je Stunde (mm/h).
@@ -1110,7 +1114,10 @@ map.on('moveend zoomend',()=>{
 /* ---------- Boot ---------- */
 (async()=>{
   try{
-    const d0=await preloadAustria(true);
+    const d0=await Promise.race([
+      preloadAustria(true),
+      new Promise((_,rej)=>setTimeout(()=>rej(new Error('Timeout: GeoSphere antwortet nicht')),25000))
+    ]);
     M.times=d0.times;M.grids=d0.grids;M.motion=d0.motion;M.ncEnd=d0.ncEndTime||0;
     const NOW=Date.now()+60000;
     frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
