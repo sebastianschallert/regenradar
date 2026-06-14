@@ -136,6 +136,47 @@
   .toast.show{opacity:1}
 
   @media (prefers-reduced-motion:reduce){.live .dot::after{animation:none}}
+
+  /* --- Ortswähler-Button im Header --- */
+  .placebtn{display:flex;align-items:center;gap:5px;background:var(--card);
+    border:1px solid var(--hair);border-radius:100px;padding:7px 12px 7px 11px;
+    font-size:13px;font-weight:600;color:var(--ink);cursor:pointer;pointer-events:auto;
+    box-shadow:0 1px 3px rgba(0,0,0,.06);max-width:160px}
+  .placebtn .pin-ic{font-size:13px;color:var(--signal);flex:0 0 auto}
+  .placebtn #placeLabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .placebtn .chev{font-size:12px;color:var(--gray);flex:0 0 auto;margin-top:-2px}
+  .placebtn:active{transform:scale(.97)}
+
+  /* --- Such-Overlay --- */
+  .placesheet{position:fixed;inset:0;z-index:2000;background:rgba(20,21,19,.28);
+    backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);
+    display:flex;justify-content:center;align-items:flex-start;
+    padding:calc(env(safe-area-inset-top,0px) + 60px) 16px 16px}
+  .placesheet[hidden]{display:none}
+  .ps-card{width:100%;max-width:420px;background:var(--card);border-radius:14px;
+    overflow:hidden;box-shadow:0 18px 50px rgba(0,0,0,.25);animation:psIn .18s ease}
+  @keyframes psIn{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+  .ps-search{display:flex;align-items:center;gap:9px;padding:13px 14px;border-bottom:1px solid var(--hair2)}
+  .ps-search .ps-ic{font-size:17px;color:var(--gray);flex:0 0 auto}
+  .ps-search input{flex:1;border:none;outline:none;font-size:16px;font-family:var(--body);
+    color:var(--ink);background:transparent;min-width:0}
+  .ps-close{flex:0 0 auto;width:26px;height:26px;border-radius:50%;border:none;
+    background:var(--paper);color:var(--gray);font-size:12px;cursor:pointer;display:grid;place-items:center}
+  .ps-results:empty{display:none}
+  .ps-row{display:flex;align-items:baseline;gap:8px;padding:12px 15px;cursor:pointer;
+    border-bottom:1px solid var(--hair2)}
+  .ps-row:active{background:var(--paper)}
+  .ps-row .nm{font-size:15px;font-weight:600;color:var(--ink)}
+  .ps-row .rg{font-size:12px;color:var(--gray)}
+  .ps-favs{padding:10px 14px 14px}
+  .ps-favs:empty{display:none}
+  .ps-favhd{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--gray);margin:4px 1px 9px}
+  .ps-fav{display:inline-flex;align-items:center;gap:6px;background:var(--paper);
+    border:1px solid var(--hair2);border-radius:100px;padding:7px 12px;margin:0 7px 7px 0;
+    font-size:13px;font-weight:500;color:var(--ink);cursor:pointer}
+  .ps-fav .x{color:var(--gray);font-size:11px;margin-left:2px}
+  .ps-fav:active{background:var(--hair2)}
 </style>
 </head>
 <body>
@@ -143,17 +184,33 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.19</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.24</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
 </div>
 
 <div class="hdr">
-  <div class="brand"><h1>Regenradar</h1></div>
   <div class="right">
-    <div class="live off" id="liveBadge"><div class="dot"></div><span id="srcTxt">VERBINDE</span></div>
     <button class="locbtn" id="locate" title="Mein Standort" aria-label="Mein Standort">◎</button>
+    <button class="placebtn" id="placeBtn" aria-label="Ort wählen">
+      <span class="pin-ic">◍</span><span id="placeLabel">Wien</span><span class="chev">⌄</span>
+    </button>
+  </div>
+  <!-- versteckter Live-Status (für Code-Kompatibilität, unsichtbar) -->
+  <div id="liveBadge" class="live off" hidden><span id="srcTxt">VERBINDE</span></div>
+</div>
+
+<!-- Ort-Such-Overlay -->
+<div class="placesheet" id="placeSheet" hidden>
+  <div class="ps-card">
+    <div class="ps-search">
+      <span class="ps-ic">⌕</span>
+      <input id="placeInput" type="text" placeholder="Ort suchen …" autocomplete="off" autocorrect="off" spellcheck="false">
+      <button class="ps-close" id="placeClose" aria-label="Schließen">✕</button>
+    </div>
+    <div class="ps-results" id="placeResults"></div>
+    <div class="ps-favs" id="placeFavs"></div>
   </div>
 </div>
 
@@ -1062,11 +1119,85 @@ $('locate').addEventListener('click',async()=>{
   try{
     const ll=await getPosition();
     focus.lat=ll[0];focus.lon=ll[1];focus.name='Mein Standort';
+    $('placeLabel').textContent='Mein Standort';
     map.flyTo(ll,11,{duration:.8});
     setFocusMarker();
     loadFocusSeries();
   }catch(e){toast('Standort nicht freigegeben')}
 });
+
+/* ====================== ORTSWÄHLER ======================
+   Suche via Open-Meteo Geocoding (keyfrei), Favoriten im Speicher.
+   Setzt focus + Karte + Box, exakt wie der GPS-Button. */
+let placeFavs=[{name:'Wien',lat:48.2082,lon:16.3738}];   /* Default-Favorit */
+function gotoPlace(p){
+  focus.lat=p.lat;focus.lon=p.lon;focus.name=p.name;
+  $('placeLabel').textContent=p.name;
+  map.flyTo([p.lat,p.lon],11,{duration:.8});
+  setFocusMarker();
+  loadFocusSeries();
+  closePlaceSheet();
+}
+function openPlaceSheet(){
+  $('placeSheet').hidden=false;
+  renderFavs();
+  $('placeResults').innerHTML='';
+  setTimeout(()=>$('placeInput').focus(),60);
+}
+function closePlaceSheet(){
+  $('placeSheet').hidden=true;
+  $('placeInput').value='';
+}
+function renderFavs(){
+  const box=$('placeFavs');
+  if(!placeFavs.length){box.innerHTML='';return}
+  box.innerHTML='<div class="ps-favhd">Gespeichert</div>'+
+    placeFavs.map((f,i)=>
+      '<span class="ps-fav" data-i="'+i+'">'+esc(f.name)+
+      '<span class="x" data-x="'+i+'">✕</span></span>').join('');
+}
+function esc(t){const d=document.createElement('div');d.textContent=t;return d.innerHTML}
+function isFav(p){return placeFavs.some(f=>Math.abs(f.lat-p.lat)<0.02&&Math.abs(f.lon-p.lon)<0.02)}
+
+let geoTimer=null;
+$('placeInput').addEventListener('input',e=>{
+  const q=e.target.value.trim();
+  clearTimeout(geoTimer);
+  if(q.length<2){$('placeResults').innerHTML='';return}
+  geoTimer=setTimeout(()=>geoSearch(q),280);
+});
+async function geoSearch(q){
+  try{
+    const url='https://geocoding-api.open-meteo.com/v1/search?name='+
+      encodeURIComponent(q)+'&count=6&language=de&format=json';
+    const r=await fetch(url);if(!r.ok)return;
+    const j=await r.json();
+    const res=$('placeResults');
+    if(!j.results||!j.results.length){res.innerHTML='<div class="ps-row"><span class="rg">Nichts gefunden</span></div>';return}
+    res.innerHTML=j.results.map(p=>{
+      const region=[p.admin1,p.country].filter(Boolean).join(', ');
+      return '<div class="ps-row" data-lat="'+p.latitude+'" data-lon="'+p.longitude+'" data-nm="'+esc(p.name)+'">'+
+        '<span class="nm">'+esc(p.name)+'</span><span class="rg">'+esc(region)+'</span></div>';
+    }).join('');
+  }catch(_){}
+}
+/* Klicks im Overlay (Event-Delegation) */
+$('placeResults').addEventListener('click',e=>{
+  const row=e.target.closest('.ps-row');if(!row||!row.dataset.lat)return;
+  const p={name:row.dataset.nm,lat:+row.dataset.lat,lon:+row.dataset.lon};
+  if(!isFav(p)){placeFavs.unshift(p);if(placeFavs.length>8)placeFavs.pop();}
+  gotoPlace(p);
+});
+$('placeFavs').addEventListener('click',e=>{
+  if(e.target.dataset.x!=null){            /* Favorit löschen */
+    placeFavs.splice(+e.target.dataset.x,1);renderFavs();e.stopPropagation();return;
+  }
+  const chip=e.target.closest('.ps-fav');if(!chip)return;
+  gotoPlace(placeFavs[+chip.dataset.i]);
+});
+$('placeBtn').addEventListener('click',openPlaceSheet);
+$('placeClose').addEventListener('click',closePlaceSheet);
+$('placeSheet').addEventListener('click',e=>{if(e.target.id==='placeSheet')closePlaceSheet()});
 
 /* ---------- Neu rendern bei Pan/Zoom (lokal) ---------- */
 let _mvT=null;
