@@ -53,16 +53,24 @@ async function run(){
     const j=await fetchT(GS+'/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox='+bb6+'&output_format=geojson',25000);
     return (j.features||[]).length+' Punkte';
   });
-  // 2b) GANZ Österreich in EINEM Abruf
-  const bbAll=AT.s+','+AT.w+','+AT.n+','+AT.e;
-  await timed('INCA GANZ AT (1 Abruf)',async()=>{
-    const j=await fetchT(GS+'/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox='+bbAll+'&output_format=geojson',30000);
+  // 2b) KLEINER Ausschnitt um Wien (±1.2° ~ 130km)
+  const wlat=48.21,wlon=16.37,r=1.2;
+  const bbSmall=(wlat-r)+','+(wlon-r)+','+(wlat+r)+','+(wlon+r);
+  await timed('INCA klein um Wien (±130km)',async()=>{
+    const j=await fetchT(GS+'/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox='+bbSmall+'&output_format=geojson',25000);
+    return (j.features||[]).length+' Punkte';
+  });
+  // 2c) Noch kleiner (±0.6° ~ 65km)
+  const r2=0.6;
+  const bbTiny=(wlat-r2)+','+(wlon-r2)+','+(wlat+r2)+','+(wlon+r2);
+  await timed('INCA winzig um Wien (±65km)',async()=>{
+    const j=await fetchT(GS+'/grid/forecast/nowcast-v1-15min-1km?parameters=rr&bbox='+bbTiny+'&output_format=geojson',25000);
     return (j.features||[]).length+' Punkte';
   });
 
   // 3) EIN AROME-Grid-Streifen
-  await timed('AROME Grid 1 Streifen',async()=>{
-    const j=await fetchT(GS+'/grid/forecast/nwp-v1-1h-2500m?parameters=rr_acc&bbox='+bb+'&output_format=geojson',25000);
+  await timed('AROME klein um Wien',async()=>{
+    const j=await fetchT(GS+'/grid/forecast/nwp-v1-1h-2500m?parameters=rr_acc&bbox='+bbSmall+'&output_format=geojson',25000);
     const n=(j.features||[]).length;
     return n+' Punkte, '+(j.timestamps||[]).length+' Zeitschritte';
   });
