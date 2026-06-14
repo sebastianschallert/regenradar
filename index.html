@@ -31,7 +31,9 @@
   .splash .pct{font-size:54px;font-weight:700;font-variant-numeric:tabular-nums;
     letter-spacing:-.02em;margin-top:42px;line-height:1}
   .splash .bar{width:min(280px,70vw);height:6px;background:var(--hair2);margin-top:18px;position:relative}
-  .splash .bar i{position:absolute;left:0;top:0;bottom:0;width:0%;background:var(--signal);transition:width .25s ease}
+  .splash .bar i{position:absolute;top:0;bottom:0;width:35%;background:var(--signal);
+    border-radius:3px;animation:barSlide 1.1s ease-in-out infinite}
+  @keyframes barSlide{0%{left:-35%}50%{left:50%}100%{left:100%}}
   .splash .stat{font-size:10px;font-weight:500;color:var(--gray);letter-spacing:.1em;
     text-transform:uppercase;margin-top:14px;min-height:13px}
 
@@ -185,8 +187,8 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.30</div>
-  <div class="pct" id="pct">0%</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.32</div>
+  <div class="pct" id="pct" style="display:none"></div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
 </div>
@@ -223,7 +225,7 @@
     <button class="playbtn" id="play" aria-label="Pause">⏸</button>
     <div class="timeinfo">
       <div class="t" id="time">––:––</div>
-      <div class="rel" id="rel" style="display:none!important">Daten laden</div>
+      <div class="rel" id="rel">Daten laden</div>
     </div>
     <button class="nowbtn" id="jumpNow" aria-label="Zu Jetzt springen">JETZT</button>
     <div class="badge" id="badge" style="display:none!important">INCA</div>
@@ -516,9 +518,7 @@ let progDone=0,progTotal=1;
 function progInit(total,label){progDone=0;progTotal=total;progSet(0,label)}
 function progTick(label,w){progDone+=(w||1);progSet(progDone/progTotal,label)}
 function progSet(f,label){
-  const p=Math.min(100,Math.round(f*100));
-  $('pct').textContent=p+'%';
-  $('barFill').style.width=p+'%';
+  /* kein Prozentwert mehr — Balken pulsiert (indeterminate), nur Label aktualisieren */
   if(label)$('stat').textContent=label;
 }
 function splashDone(){const s=$('splash');s.classList.add('done');
@@ -808,10 +808,10 @@ function applyPos(){
   const fut=frames[Math.round(pos)].future;
   const rel=$('rel'),badge=$('badge');
   if(fut){
-    rel.textContent=diff<=0?'Prognose':'Prognose · in '+relFmt(diff);
+    rel.textContent=diff<=0?'gleich':'in '+relFmt(diff);
     badge.textContent='PROGNOSE';badge.classList.add('fc');
   }else{
-    rel.textContent=diff>=-2?'Jetzt':'Vor '+relFmt(diff);
+    rel.textContent=diff>=-2?'jetzt':'vor '+relFmt(diff);
     badge.textContent=source==='inca'?'INCA':'RADAR';badge.classList.remove('fc');
   }
   $('strip').style.transform='translateX('+($('track').clientWidth/2-(pos+0.5)*PPF)+'px)';
@@ -1214,12 +1214,16 @@ $('placeInput').addEventListener('input',e=>{
 async function geoSearch(q){
   try{
     const url='https://geocoding-api.open-meteo.com/v1/search?name='+
-      encodeURIComponent(q)+'&count=8&language=de&format=json&countryCode=AT';
+      encodeURIComponent(q)+'&count=10&language=de&format=json';
     const r=await fetch(url);if(!r.ok)return;
     const j=await r.json();
     const res=$('placeResults');
-    if(!j.results||!j.results.length){res.innerHTML='<div class="ps-row"><span class="rg">Nichts gefunden</span></div>';return}
-    res.innerHTML=j.results.map(p=>{
+    let list=(j.results||[]);
+    /* Österreich zuerst, dann Nachbarn (client-seitig, zuverlässiger als API-Filter) */
+    list=list.filter(p=>p.country_code==='AT')
+      .concat(list.filter(p=>p.country_code!=='AT'));
+    if(!list.length){res.innerHTML='<div class="ps-row"><span class="rg">Nichts gefunden</span></div>';return}
+    res.innerHTML=list.slice(0,8).map(p=>{
       const region=[p.admin1,p.country].filter(Boolean).join(', ');
       return '<div class="ps-row" data-lat="'+p.latitude+'" data-lon="'+p.longitude+'" data-nm="'+esc(p.name)+'">'+
         '<span class="nm">'+esc(p.name)+'</span><span class="rg">'+esc(region)+'</span></div>';
