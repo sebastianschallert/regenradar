@@ -187,7 +187,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.32</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.33</div>
   <div class="pct" id="pct" style="display:none"></div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -1213,18 +1213,18 @@ $('placeInput').addEventListener('input',e=>{
 });
 async function geoSearch(q){
   try{
+    /* count=100: Open-Meteo sortiert AT-Orte oft schlecht ein → viele holen,
+       dann hart auf Österreich filtern und nach Einwohnerzahl sortieren. */
     const url='https://geocoding-api.open-meteo.com/v1/search?name='+
-      encodeURIComponent(q)+'&count=10&language=de&format=json';
+      encodeURIComponent(q)+'&count=100&language=de&format=json';
     const r=await fetch(url);if(!r.ok)return;
     const j=await r.json();
     const res=$('placeResults');
-    let list=(j.results||[]);
-    /* Österreich zuerst, dann Nachbarn (client-seitig, zuverlässiger als API-Filter) */
-    list=list.filter(p=>p.country_code==='AT')
-      .concat(list.filter(p=>p.country_code!=='AT'));
-    if(!list.length){res.innerHTML='<div class="ps-row"><span class="rg">Nichts gefunden</span></div>';return}
+    let list=(j.results||[]).filter(p=>p.country_code==='AT');
+    list.sort((a,b)=>(b.population||0)-(a.population||0));   /* große Orte zuerst */
+    if(!list.length){res.innerHTML='<div class="ps-row"><span class="rg">Kein österreichischer Ort</span></div>';return}
     res.innerHTML=list.slice(0,8).map(p=>{
-      const region=[p.admin1,p.country].filter(Boolean).join(', ');
+      const region=p.admin1||'Österreich';
       return '<div class="ps-row" data-lat="'+p.latitude+'" data-lon="'+p.longitude+'" data-nm="'+esc(p.name)+'">'+
         '<span class="nm">'+esc(p.name)+'</span><span class="rg">'+esc(region)+'</span></div>';
     }).join('');
