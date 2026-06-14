@@ -57,10 +57,8 @@
     border-top:1px solid var(--hair);
     padding:15px 16px calc(env(safe-area-inset-bottom,0px) + 16px)}
   .row{display:flex;align-items:center;gap:13px}
-  .playbtn{flex:0 0 auto;width:42px;height:42px;border-radius:50%;cursor:pointer;
-    background:var(--card);border:1.5px solid var(--ink);color:var(--ink);
-    font-size:15px;display:grid;place-items:center;transition:background .15s,color .15s}
-  .playbtn:active{background:var(--ink);color:var(--card)}
+  .playbtn{flex:0 0 auto;width:46px;height:46px;border-radius:4px;border:none;cursor:pointer;
+    background:var(--signal);color:#fff;font-size:17px;display:grid;place-items:center}
   .playbtn:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
   .timeinfo{flex:1;min-width:0}
   .t{font-size:30px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.01em;line-height:1}
@@ -122,16 +120,15 @@
   .playhead::after{content:"";position:absolute;top:-5px;left:50%;transform:translateX(-50%);
     border:4px solid transparent;border-top:5px solid var(--signal)}
 
-  .legend{position:fixed;right:10px;top:50%;transform:translateY(-50%);z-index:999;
-    display:flex;align-items:stretch;gap:6px;pointer-events:none}
-  .legend .lscale{display:flex;flex-direction:column-reverse;width:5px;
-    border-radius:2.5px;overflow:hidden;box-shadow:0 0 0 .5px rgba(20,21,19,.12)}
-  .legend .lstep{flex:1}
-  .legend .lticks{display:flex;flex-direction:column-reverse;justify-content:space-between;
-    font-size:8px;font-weight:500;color:var(--gray);font-variant-numeric:tabular-nums;
-    letter-spacing:.02em;line-height:1;padding:1px 0}
-  .legend .lcap{position:absolute;right:0;top:-15px;font-size:7.5px;font-weight:700;
-    letter-spacing:.14em;color:var(--gray);text-transform:uppercase}
+  .legend{position:fixed;right:12px;top:50%;transform:translateY(-50%);z-index:999;
+    background:var(--card);border:1px solid var(--hair);border-radius:4px;padding:10px 9px;
+    display:flex;flex-direction:column;align-items:center;gap:6px}
+  .lbar{width:8px;height:110px;
+    background:linear-gradient(to top,
+      rgba(147,167,201,.85) 0 14%,#3E8FF3 14% 28%,#2362D2 28% 42%,
+      #3F48CC 42% 57%,#7C3AED 57% 71%,#E03131 71% 86%,#7A1212 86% 100%)}
+  .legend span{font-size:8.5px;font-weight:500;color:var(--gray);letter-spacing:.08em;
+    writing-mode:vertical-rl;transform:rotate(180deg)}
 
   .toast{position:fixed;top:calc(env(safe-area-inset-top,0px) + 66px);left:50%;transform:translateX(-50%);
     z-index:1100;background:var(--ink);color:var(--paper);border-radius:4px;max-width:88%;
@@ -146,7 +143,7 @@
 
 <div class="splash" id="splash">
   <h1>Regenradar</h1>
-  <div class="sub">GeoSphere Austria · INCA · v6.23</div>
+  <div class="sub">GeoSphere Austria · INCA · v6.19</div>
   <div class="pct" id="pct">0%</div>
   <div class="bar"><i id="barFill"></i></div>
   <div class="stat" id="stat">Verbinde …</div>
@@ -161,10 +158,7 @@
 </div>
 
 <div class="legend" aria-hidden="true">
-  <div class="lscale" id="lscale"></div>
-  <div class="lticks">
-    <span>0.1</span><span>1</span><span>5</span><span>10</span><span>mm/h</span>
-  </div>
+  <span>stark</span><div class="lbar"></div><span>leicht</span>
 </div>
 
 <div class="panel">
@@ -214,17 +208,6 @@ const gW=Math.round((AT.e-AT.w)*111.32*midCos);
 const gH=Math.round((AT.n-AT.s)*111.32);
 const LEVELS=[0.05,0.2,0.5,1.0,2.5,5.0,10.0];
 function levelFor(v){let l=0;for(let i=0;i<LEVELS.length;i++)if(v>=LEVELS[i])l=i+1;return l}
-/* Legenden-Skala aus den echten Radar-Klassenfarben (diskrete Stufen) */
-(function buildLegend(){
-  const sc=document.getElementById('lscale');if(!sc)return;
-  for(let l=1;l<=7;l++){
-    const c=CLASS_RGBA[l];
-    const d=document.createElement('div');
-    d.className='lstep';
-    d.style.background='rgb('+c[0]+','+c[1]+','+c[2]+')';
-    sc.appendChild(d);
-  }
-})();
 function writeStripe(timeMap,gj,limit){
   const times=(gj.timestamps||[]).slice(0,limit||Infinity).map(Date.parse);
   const grids=times.map(t=>{
@@ -248,13 +231,9 @@ function writeStripe(timeMap,gj,limit){
   }
 }
 async function fetchGrid(url){
-  const ctl=new AbortController();
-  const to=setTimeout(()=>ctl.abort(),15000);   /* 15s Timeout statt ewig hängen */
-  try{
-    const res=await fetch(url,{signal:ctl.signal});
-    if(!res.ok)throw new Error('HTTP '+res.status);
-    return await res.json();
-  }finally{clearTimeout(to)}
+  const res=await fetch(url);
+  if(!res.ok)throw new Error('HTTP '+res.status);
+  return res.json();
 }
 /* AROME-Grid: rr_acc ist akkumuliert seit Forecast-Start.
    Schritt 1: stuendliche Differenz = Regen je Stunde (mm/h).
@@ -373,33 +352,24 @@ self.onmessage=async e=>{
     const ncOk=res.slice(0,STRIPES).some(r=>r===true);
     if(!ncOk)throw new Error('Prognose nicht ladbar');
 
-    /* --- INCA SOFORT senden (App ist sofort live, ohne auf AROME zu warten) --- */
+    /* AROME dahinter anhängen (stündlich, bis ~60h) */
     const ncTimes=[...timeMap.keys()].sort((a,b)=>a-b);
     const ncEnd=ncTimes.length?ncTimes[ncTimes.length-1]:Date.now();
-    {
-      const grids=ncTimes.map(t=>timeMap.get(t));
-      const motion=smoothMotion(computeMotion(grids));
-      /* Kopien senden (Originale bleiben im Worker für den AROME-Merge) */
-      const copies=grids.map(g=>g.slice().buffer);
-      self.postMessage({type:'done',times:ncTimes,grids:copies,motion,ncEndTime:ncEnd},copies);
-    }
-
-    /* --- AROME im Hintergrund nachladen und separat nachschicken --- */
     const aTasks=stripes.map(bb=>async()=>{
       try{
         const gj=await fetchGrid(GS+'/grid/forecast/nwp-v1-1h-2500m?parameters=rr_acc&bbox='+bb+'&output_format=geojson');
-        writeStripeArome(timeMap,gj,ncEnd+1);
+        writeStripeArome(timeMap,gj,ncEnd+1);   /* nur Zeiten nach NC-Ende */
+        self.postMessage({type:'prog',label:'Lade Tagesvorhersage …'});
         return true;
       }catch(_){return false}
     });
     await pool(aTasks,3);
-    const allTimes=[...timeMap.keys()].sort((a,b)=>a-b);
-    if(allTimes.length>ncTimes.length){
-      const grids=allTimes.map(t=>timeMap.get(t));
-      const motion=smoothMotion(computeMotion(grids));
-      const bufs=grids.map(g=>g.buffer);
-      self.postMessage({type:'arome',times:allTimes,grids:bufs,motion,ncEndTime:ncEnd},bufs);
-    }
+
+    const times=[...timeMap.keys()].sort((a,b)=>a-b);
+    const grids=times.map(t=>timeMap.get(t));
+    const motion=smoothMotion(computeMotion(grids));
+    const bufs=grids.map(g=>g.buffer);
+    self.postMessage({type:'done',times,grids:bufs,motion,ncEndTime:ncEnd},bufs);
   }catch(err){
     self.postMessage({type:'err',msg:String((err&&err.message)||err)});
   }
@@ -473,17 +443,6 @@ const CLASS_RGBA=[null,
   [147,167,201,85],[62,143,243,200],[35,98,210,210],[63,72,204,215],
   [124,58,237,222],[224,49,49,230],[122,18,18,235]];
 function levelFor(v){let l=0;for(let i=0;i<LEVELS.length;i++)if(v>=LEVELS[i])l=i+1;return l}
-/* Legenden-Skala aus den echten Radar-Klassenfarben (diskrete Stufen) */
-(function buildLegend(){
-  const sc=document.getElementById('lscale');if(!sc)return;
-  for(let l=1;l<=7;l++){
-    const c=CLASS_RGBA[l];
-    const d=document.createElement('div');
-    d.className='lstep';
-    d.style.background='rgb('+c[0]+','+c[1]+','+c[2]+')';
-    sc.appendChild(d);
-  }
-})();
 const LUT=new Uint32Array(256);
 (function(){
   const buf=new ArrayBuffer(4),u8=new Uint8Array(buf),u32=new Uint32Array(buf);
@@ -511,18 +470,6 @@ const M={gW:0,gH:0,times:[],grids:[],motion:[],ncEnd:0};
    Web Worker, das UI bekommt nur fertige Typed Arrays. */
 const worker=new Worker(URL.createObjectURL(
   new Blob([document.getElementById('wsrc').textContent],{type:'text/javascript'})));
-
-/* AROME kommt nach dem INCA-"done" separat nach → eigener dauerhafter Listener.
-   Hängt die Vorhersage-Frames an, ohne den laufenden Film zu unterbrechen. */
-worker.addEventListener('message',e=>{
-  const d=e.data;
-  if(d.type!=='arome')return;
-  if(source!=='inca')return;
-  const times=d.times, grids=d.grids.map(b=>new Uint8Array(b));
-  pendingRefresh={times,grids,motion:d.motion,ncEndTime:d.ncEndTime};
-  if(!playing)commitRefresh();   /* pausiert → sofort; sonst am Schleifenende */
-});
-
 function preloadAustria(showSplash){
   if(showSplash)progInit(STRIPES*8+MAX_FUTURE+6,'Verbinde mit GeoSphere …');
   return new Promise((resolve,reject)=>{
@@ -826,10 +773,7 @@ lastT=performance.now();
 requestAnimationFrame(loop);
 
 function setPlaying(p){playing=p;
-  const b=$('play');
-  b.textContent=p?'⏸':'▶';
-  b.style.paddingLeft=p?'0':'3px';   /* ▶ optisch mittig */
-  b.setAttribute('aria-label',p?'Pause':'Abspielen');
+  $('play').textContent=p?'⏸':'▶';
   $('play').setAttribute('aria-label',p?'Pause':'Abspielen')}
 $('play').addEventListener('click',()=>setPlaying(!playing));
 $('jumpNow').addEventListener('click',()=>{pos=nowIdx();applyPos()});
@@ -1135,10 +1079,7 @@ map.on('moveend zoomend',()=>{
 /* ---------- Boot ---------- */
 (async()=>{
   try{
-    const d0=await Promise.race([
-      preloadAustria(true),
-      new Promise((_,rej)=>setTimeout(()=>rej(new Error('Timeout: GeoSphere antwortet nicht')),40000))
-    ]);
+    const d0=await preloadAustria(true);
     M.times=d0.times;M.grids=d0.grids;M.motion=d0.motion;M.ncEnd=d0.ncEndTime||0;
     const NOW=Date.now()+60000;
     frames=M.times.map(t=>({time:t,future:t>NOW,overlay:null}));
